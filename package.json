@@ -1,0 +1,34 @@
+{
+  "name": "3d-asset-forge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "dev:tauri": "vite --host 127.0.0.1 --port 5190 --strictPort",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-fs": "^2.5.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.171.0",
+    "vite": "^6.0.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.171.0",
+    "typescript": "^5.7.2"
+  }
+}

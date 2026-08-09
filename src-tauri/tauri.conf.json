@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "3D Asset Forge",
+  "version": "0.1.0",
+  "identifier": "com.nics.assetforge",
+  "build": {
+    "beforeDevCommand": "npm run dev:tauri",
+    "devUrl": "http://127.0.0.1:5190",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "3D Asset Forge",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 720,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Professional procedural 3D asset workbench",
+    "longDescription": "3D Asset Forge creates, validates, previews and exports game-ready procedural 3D assets."
+  }
+}
