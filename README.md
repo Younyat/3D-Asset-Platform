@@ -54,6 +54,39 @@ La demo aprendida aplica movimiento sobre la escena Three.js ya cargada, evitand
 
 ![Demo animada de movimiento aprendido](docs/readme-assets/learned-motion-demo.gif)
 
+### Desmantelado En Piezas
+
+Un modelo robotico importado puede separarse en piezas reutilizables. Cada pieza queda clasificada por categoria y clase dentro del warehouse, con miniatura real generada desde la escena.
+
+![Warehouse con piezas desmontadas y miniaturas reales](docs/readme-assets/warehouse-dismantled-parts.png)
+
+### Reconstruccion En Workspace
+
+Las piezas guardadas pueden volver al escenario como objetos independientes. Esto permite reconstruir conjuntos, modificar piezas sueltas, crear variantes y guardar nuevas versiones.
+
+![Workspace con piezas reconstruidas desde el warehouse](docs/readme-assets/workspace-reconstructed-parts.png)
+
+### Modelo Robotico Importado
+
+El flujo empieza con modelos reales importados, no con placeholders. La plataforma mantiene la visualizacion del asset completo mientras permite extraer piezas y convertirlas en componentes reutilizables.
+
+![Modelo robotico importado en el workspace](docs/readme-assets/workspace-robot-imported.png)
+
+## Casos De Uso Y Valor
+
+3D Asset Forge esta pensada para convertir modelos 3D complejos en una libreria reutilizable de componentes. Esto reduce tiempo de preparacion, evita rehacer piezas y permite crear variantes comerciales a partir de assets existentes.
+
+Casos de uso principales:
+
+- Preparacion de catalogos 3D: desmontar modelos de vehiculos, brazos roboticos, maquinaria o productos y guardar piezas independientes con miniaturas.
+- Reutilizacion de componentes: extraer bases, articulaciones, ruedas, paneles, brazos o pinzas para crear nuevos conjuntos sin volver al modelo original.
+- Prototipado industrial: importar piezas guardadas al workspace, combinarlas y guardar conjuntos como assemblies reutilizables.
+- Variantes de producto: cambiar color, escala o posicion de una pieza y guardarla como nuevo GLB permanente.
+- Control de inventario visual: revisar categorias, clases, codigos, peso del warehouse y previews antes de importar una pieza.
+- Pipeline comercial: preparar assets limpios para GLB, Unity, Unreal, Godot, web viewers, configuradores y demos de producto.
+
+![Warehouse como libreria visual de componentes](docs/readme-assets/warehouse-reconstruction-library.png)
+
 ## Como Funciona
 
 Manual operativo separado:
