@@ -50,14 +50,20 @@ import {
   AssetDocument,
   EditorTool,
   GeometryDefinition,
+  ImportedModelGeometry,
   JointMotionKind,
   MaterialDefinition,
   MotionAxis,
+  PartEditMode,
+  PartWarehouseAssemblyItem,
+  PartWarehousePartItem,
+  PartWarehouseItem,
   SceneNode,
   Transform,
   ValidatedJointMotion,
   ValidationIssue,
 } from '../domain/model';
+import type { KinematicGraph } from '../domain/kinematics';
 import {
   isDesktopRuntime,
   openProjectNative,
@@ -74,7 +80,19 @@ import {
   saveProjectAutosave,
   saveProjectToBrowser,
 } from '../infrastructure/projectStorage';
-import { MotionTrainingPreview, ThreeViewport, ViewportStats } from './components/ThreeViewport';
+import {
+  deleteWarehouseItem as deletePersistentWarehouseItem,
+  loadWarehouseItems,
+  loadWarehouseItemsWithFallback,
+  loadWarehouseStorageInfo,
+  saveWarehouseGlbItem,
+  saveWarehouseItems,
+  saveWarehouseThumbnail,
+  type WarehouseStorageInfo,
+  warehouseItemKey,
+} from '../infrastructure/warehouseRepository';
+import { createIndependentWarehousePartGeometry } from '../infrastructure/warehouseParts';
+import { ImportedPartSelection, MotionTrainingPreview, ThreeViewport, ViewportStats } from './components/ThreeViewport';
 
 const makeStarterProject = () => {
   const project = createEmptyProject('Prototype Asset');
@@ -105,8 +123,21 @@ const touch = (document: AssetDocument): AssetDocument => ({
 const selectedName = (geometry: GeometryDefinition) => {
   if ('generatorId' in geometry) return getGeneratorDefinition(geometry.generatorId)?.name ?? 'Unknown Generator';
   if (geometry.kind === 'imported-model') return `Imported ${geometry.sourceFormat.toUpperCase()}`;
+  if (geometry.kind === 'serialized-object') return 'Stored Part';
   return geometry.kind.charAt(0).toUpperCase() + geometry.kind.slice(1);
 };
+
+const isStarterPlaceholderNode = (node: SceneNode) =>
+  node.name === 'Game Box' &&
+  node.geometry.kind === 'box' &&
+  node.geometry.width === 2 &&
+  node.geometry.height === 1.4 &&
+  node.geometry.depth === 2 &&
+  node.transform.position[0] === 0 &&
+  node.transform.position[1] === 0.5 &&
+  node.transform.position[2] === 0 &&
+  node.transform.rotation.every((value) => value === 0) &&
+  node.transform.scale.every((value) => value === 1);
 
 const materialPresets: MaterialDefinition[] = [
   { name: 'Graphite PBR', color: '#3f4953', roughness: 0.52, metalness: 0.08 },
@@ -114,6 +145,11 @@ const materialPresets: MaterialDefinition[] = [
   { name: 'Military Black', color: '#20262a', roughness: 0.72, metalness: 0.25 },
   { name: 'Safety Orange', color: '#d66b2c', roughness: 0.46, metalness: 0.12 },
   { name: 'Emissive Red Trim', color: '#34383d', roughness: 0.42, metalness: 0.35, emissive: '#e53935', emissiveIntensity: 1.8 },
+  { name: 'Signal Blue', color: '#2874c8', roughness: 0.38, metalness: 0.18 },
+  { name: 'Factory Yellow', color: '#d4a62a', roughness: 0.5, metalness: 0.16 },
+  { name: 'Hydraulic Green', color: '#2f7d57', roughness: 0.56, metalness: 0.12 },
+  { name: 'Ceramic White', color: '#d9dee2', roughness: 0.32, metalness: 0.04 },
+  { name: 'Anodized Violet', color: '#6d4cc2', roughness: 0.3, metalness: 0.45 },
 ];
 
 type MotionTrainingCandidate = {
@@ -189,15 +225,194 @@ const makeMotionTrainingCandidates = (node: SceneNode): MotionTrainingCandidate[
   return candidates;
 };
 
+const legacyAxisVector = (axis?: MotionAxis): [number, number, number] => {
+  if (axis === 'y') return [0, 1, 0];
+  if (axis === 'z') return [0, 0, 1];
+  return [1, 0, 0];
+};
+
+const graphFromImportedGeometry = (geometry: ImportedModelGeometry): KinematicGraph => {
+  if (geometry.kinematicGraph) return geometry.kinematicGraph;
+
+  const rootPartId = 'part_source_model';
+  const sourceBounds = {
+    min: [0, 0, 0] as [number, number, number],
+    max: geometry.originalBounds,
+    size: geometry.originalBounds,
+    center: [geometry.originalBounds[0] / 2, geometry.originalBounds[1] / 2, geometry.originalBounds[2] / 2] as [number, number, number],
+  };
+
+  return {
+    rootPartId,
+    parts: [
+      {
+        id: rootPartId,
+        name: 'SOURCE MODEL',
+        meshObjectIds: [],
+        localFrame: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        bounds: sourceBounds,
+        static: true,
+        visible: true,
+        source: 'imported',
+        metadata: { migratedFromLegacyJoints: true },
+      },
+      ...geometry.joints.map((joint, index) => ({
+        id: `part_${index + 1}_${joint.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}`,
+        name: joint.label ?? joint.name,
+        meshObjectIds: [joint.name],
+        localFrame: {
+          position: [0, 0, 0] as [number, number, number],
+          rotation: [0, 0, 0] as [number, number, number],
+          scale: [1, 1, 1] as [number, number, number],
+        },
+        bounds: sourceBounds,
+        static: false,
+        visible: true,
+        source: 'imported' as const,
+        metadata: { legacyJointName: joint.name },
+      })),
+    ],
+    joints: geometry.joints.map((joint, index) => ({
+      id: `joint_${index + 1}_${joint.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}`,
+      name: joint.label ?? joint.name,
+      parentPartId: rootPartId,
+      childPartId: `part_${index + 1}_${joint.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}`,
+      type: joint.motionKind === 'translation' ? ('prismatic' as const) : ('revolute' as const),
+      origin: { position: [0, 0, 0], rotation: [0, 0, 0, 1] },
+      axis: legacyAxisVector(joint.axis),
+      limits: { lower: joint.min, upper: joint.max },
+      source: 'name-heuristic' as const,
+      confidence: 0.45,
+      evidence: [{ type: 'semantic-name' as const, score: 0.45, message: 'Migrated from legacy articulation controls.' }],
+      status: 'candidate' as const,
+    })),
+  };
+};
+
+const cleanPartToken = (value: string) =>
+  value
+    .replace(/\.(glb|fbx|dae|obj|3ds)$/i, '')
+    .replace(/[_-]+/g, ' ')
+    .trim();
+
+const inferPartCategory = (assetName: string, objectName: string) => {
+  const text = `${assetName} ${objectName}`.toLowerCase();
+  if (/audi|car|vehicle|wheel|tire|door|hood|bonnet|trunk|bumper/.test(text)) return 'Vehicles';
+  if (/robot|arm|axis|joint|grip|claw|wrist|elbow|shoulder/.test(text)) return 'Robot Arms';
+  if (/belt|conveyor|roller|pulley|cinta/.test(text)) return 'Conveyors';
+  if (/tree|branch|leaf|trunk/.test(text)) return 'Trees';
+  if (/house|wall|door|window|roof/.test(text)) return 'Buildings';
+  return 'General Parts';
+};
+
+const inferPartClassName = (objectName: string) => {
+  const text = objectName.toLowerCase();
+  if (/wheel|tire|tyre/.test(text)) return 'Wheel';
+  if (/door|hood|bonnet|trunk|panel|cover/.test(text)) return 'Panel';
+  if (/axis|joint|pivot|rotating|wrist|elbow|shoulder/.test(text)) return 'Joint';
+  if (/arm|forearm|link|beam/.test(text)) return 'Arm Link';
+  if (/grip|claw|finger|grasper/.test(text)) return 'End Effector';
+  if (/base|frame|body|chassis/.test(text)) return 'Structure';
+  if (/belt|roller|pulley/.test(text)) return 'Transmission';
+  return 'Component';
+};
+
+const makePartCode = (category: string, className: string, index: number) =>
+  `${category.slice(0, 3)}-${className.slice(0, 3)}-${String(index + 1).padStart(4, '0')}`.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+
+const cloneGeometry = <T extends GeometryDefinition>(geometry: T): T => JSON.parse(JSON.stringify(geometry)) as T;
+
+const cloneStoredNode = (node: SceneNode, index = 0): SceneNode => ({
+  ...node,
+  id: `node_${crypto.randomUUID().slice(0, 8)}`,
+  name: index ? `${node.name} ${index + 1}` : node.name,
+  geometry: cloneGeometry(node.geometry),
+  material: { ...node.material },
+  transform: {
+    position: [node.transform.position[0] + index * 0.45, node.transform.position[1], node.transform.position[2] + index * 0.25],
+    rotation: [...node.transform.rotation],
+    scale: [...node.transform.scale],
+  },
+  locked: false,
+  createdAt: new Date().toISOString(),
+});
+
+const cloneWarehouseItemForImport = (item: PartWarehouseItem, index: number): PartWarehouseItem => {
+  const now = new Date().toISOString();
+  const code = makePartCode(item.category, item.className, index);
+
+  if (item.itemType === 'assembly') {
+    return {
+      ...item,
+      id: `assembly_${crypto.randomUUID().slice(0, 8)}`,
+      code,
+      assemblyNodes: item.assemblyNodes.map((node, nodeIndex) => cloneStoredNode(node, nodeIndex)),
+      metadata: { ...item.metadata, updatedAt: now },
+    };
+  }
+
+  return {
+    ...item,
+    id: `part_${crypto.randomUUID().slice(0, 8)}`,
+    code,
+    geometry: cloneGeometry(item.geometry),
+    material: { ...item.material },
+    metadata: { ...item.metadata, updatedAt: now },
+  };
+};
+
+const sceneAssemblyBounds = (nodes: SceneNode[]): [number, number, number] => {
+  const importedBounds = nodes
+    .map((node) => (node.geometry.kind === 'imported-model' || node.geometry.kind === 'serialized-object' ? node.geometry.normalizedBounds : undefined))
+    .filter((bounds): bounds is [number, number, number] => Boolean(bounds));
+  if (!importedBounds.length) return [1, 1, 1];
+  return importedBounds.reduce<[number, number, number]>(
+    (max, bounds) => [Math.max(max[0], bounds[0]), Math.max(max[1], bounds[1]), Math.max(max[2], bounds[2])],
+    [0, 0, 0],
+  );
+};
+
+const mergeWarehouseItems = (currentItems: PartWarehouseItem[] = [], incomingItems: PartWarehouseItem[] = []) => {
+  const indexByKey = new Map(currentItems.map((item, index) => [warehouseItemKey(item), index]));
+  const merged = [...currentItems];
+  incomingItems.forEach((item) => {
+    const key = warehouseItemKey(item);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, merged.length);
+      merged.push(item);
+    } else {
+      merged[existingIndex] = item;
+    }
+  });
+  return merged;
+};
+
+const formatGigabytes = (bytes: number) => `${(bytes / 1024 / 1024 / 1024).toFixed(3)} GB`;
+
+const blobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error('Preview conversion failed.'));
+    reader.readAsDataURL(blob);
+  });
+
 export const App = () => {
   const [document, setDocument] = useState<AssetDocument>(loadInitialProject);
   const [past, setPast] = useState<AssetDocument[]>([]);
   const [future, setFuture] = useState<AssetDocument[]>([]);
   const [tool, setTool] = useState<EditorTool>('translate');
+  const [partEditMode, setPartEditMode] = useState<PartEditMode>('free');
+  const [selectedParts, setSelectedParts] = useState<ImportedPartSelection[]>([]);
+  const [warehouseMenu, setWarehouseMenu] = useState<{ itemId: string; x: number; y: number } | undefined>();
+  const [workspaceMenu, setWorkspaceMenu] = useState<{ nodeId: string; x: number; y: number } | undefined>();
+  const [activeView, setActiveView] = useState<'workspace' | 'warehouse'>('workspace');
+  const [pendingWorkspaceNodeIds, setPendingWorkspaceNodeIds] = useState<string[]>([]);
   const [snapEnabled, setSnapEnabled] = useState(false);
   const [issues, setIssues] = useState<ValidationIssue[]>(() => validateProject(document));
   const [status, setStatus] = useState('Ready');
-  const [stats, setStats] = useState<ViewportStats>({ fps: 0, objects: document.nodes.length, triangles: 0 });
+  const [stats, setStats] = useState<ViewportStats>({ fps: 0, objects: document.nodes.length, triangles: 0, cpuPercent: 0 });
   const [autosaveAvailable, setAutosaveAvailable] = useState(false);
   const [exportProfileId, setExportProfileId] = useState<ExportProfileId>('generic-glb');
   const [exportReport, setExportReport] = useState<ExportReport | null>(null);
@@ -206,12 +421,36 @@ export const App = () => {
   const [nativeProjectPath, setNativeProjectPath] = useState<string | undefined>();
   const [demoMotionNodeId, setDemoMotionNodeId] = useState<string | undefined>();
   const [motionTrainer, setMotionTrainer] = useState<MotionTrainerState | undefined>();
+  const [warehouseStorageInfo, setWarehouseStorageInfo] = useState<WarehouseStorageInfo>({ items: 0, usageBytes: 0, quotaBytes: 0, savedItems: [] });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const glbInputRef = useRef<HTMLInputElement | null>(null);
+  const warehouseInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedNode = useMemo(
     () => document.nodes.find((node) => node.id === document.selectedNodeId),
     [document.nodes, document.selectedNodeId],
+  );
+  const selectedWarehouseItem = useMemo(
+    () => document.partWarehouse?.find((item) => item.id === document.selectedWarehouseItemId),
+    [document.partWarehouse, document.selectedWarehouseItemId],
+  );
+  const warehouseGroups = useMemo(() => {
+    const groups = new Map<string, Map<string, PartWarehouseItem[]>>();
+    (document.partWarehouse ?? []).forEach((item) => {
+      const classes = groups.get(item.category) ?? new Map<string, PartWarehouseItem[]>();
+      const items = classes.get(item.className) ?? [];
+      items.push(item);
+      classes.set(item.className, items);
+      groups.set(item.category, classes);
+    });
+    return [...groups.entries()].map(([category, classes]) => ({
+      category,
+      classes: [...classes.entries()].map(([className, items]) => ({ className, items })),
+    }));
+  }, [document.partWarehouse]);
+  const selectedPartsForSelectedNode = useMemo(
+    () => (selectedNode ? selectedParts.filter((part) => part.nodeId === selectedNode.id) : []),
+    [selectedNode, selectedParts],
   );
 
   const currentMotionCandidate = useMemo(() => {
@@ -250,6 +489,29 @@ export const App = () => {
     [document],
   );
 
+  const markWorkspaceNodesPending = useCallback((nodeIds: string[]) => {
+    const cleanIds = nodeIds.filter(Boolean);
+    if (!cleanIds.length) return;
+    setPendingWorkspaceNodeIds((current) => [...new Set([...current, ...cleanIds])]);
+  }, []);
+
+  const clearPendingWorkspaceNodes = useCallback((nodeIds: string[]) => {
+    const cleanIds = new Set(nodeIds);
+    setPendingWorkspaceNodeIds((current) => current.filter((nodeId) => !cleanIds.has(nodeId)));
+  }, []);
+
+  const refreshWarehouseStorageInfo = useCallback(async () => {
+    try {
+      const info = await loadWarehouseStorageInfo(document.metadata.id);
+      setWarehouseStorageInfo(info);
+      return info;
+    } catch {
+      const emptyInfo: WarehouseStorageInfo = { items: 0, usageBytes: 0, quotaBytes: 0, savedItems: [] };
+      setWarehouseStorageInfo(emptyInfo);
+      return emptyInfo;
+    }
+  }, [document.metadata.id]);
+
   useEffect(() => {
     try {
       setAutosaveAvailable(Boolean(loadProjectAutosave()));
@@ -268,6 +530,77 @@ export const App = () => {
   }, [document]);
 
   useEffect(() => {
+    let cancelled = false;
+    loadWarehouseItems(document.metadata.id)
+      .then((items) => {
+        if (cancelled || !items.length) return;
+        setDocument((current) => {
+          if (current.metadata.id !== document.metadata.id) return current;
+          const mergedItems = mergeWarehouseItems(current.partWarehouse ?? [], items);
+          if (mergedItems.length === (current.partWarehouse ?? []).length) return current;
+          setStatus(`${items.length} permanent warehouse items loaded`);
+          return touch({
+            ...current,
+            partWarehouse: mergedItems,
+            selectedWarehouseItemId: current.selectedWarehouseItemId ?? mergedItems[0]?.id,
+          });
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setStatus('Permanent warehouse unavailable');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [document.metadata.id]);
+
+  useEffect(() => {
+    void refreshWarehouseStorageInfo();
+  }, [refreshWarehouseStorageInfo]);
+
+  useEffect(() => {
+    const runtimeWindow = window as Window & {
+      __assetForgeDocument?: AssetDocument;
+      __assetForgeCreateLegacyWarehouseItem?: () => boolean;
+    };
+    runtimeWindow.__assetForgeDocument = document;
+    runtimeWindow.__assetForgeCreateLegacyWarehouseItem = () => {
+      const imported = document.nodes.find((node) => node.geometry.kind === 'imported-model');
+      if (!imported || imported.geometry.kind !== 'imported-model') return false;
+      const now = new Date().toISOString();
+      const item: PartWarehousePartItem = {
+        id: 'legacy_invisible_pivot',
+        itemType: 'part',
+        code: 'ROB-JOI-LEGACY',
+        name: 'Legacy Pivot',
+        category: 'Robot Arms',
+        className: 'Joint',
+        sourceNodeId: imported.id,
+        sourceAssetName: imported.geometry.assetName,
+        objectName: 'legacy_non_renderable_pivot',
+        geometry: {
+          ...imported.geometry,
+          isolatedObjectNames: ['legacy_non_renderable_pivot'],
+          partObjectNames: undefined,
+          freePartTransforms: [],
+          partMaterials: [],
+        },
+        material: imported.material,
+        metadata: {
+          sourceFormat: imported.geometry.sourceFormat,
+          originalBounds: imported.geometry.originalBounds,
+          storedAt: now,
+          updatedAt: now,
+        },
+      };
+      setDocument(touch({ ...document, partWarehouse: [item], selectedWarehouseItemId: item.id }));
+      setStatus('Legacy warehouse item created');
+      return true;
+    };
+  }, [document]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.tagName === 'INPUT') return;
@@ -283,13 +616,19 @@ export const App = () => {
         event.preventDefault();
         save();
       } else if (key === 'w') {
-        setTool('translate');
+        if (tool === 'parts') setPartEditMode('translate');
+        else setTool('translate');
       } else if (key === 'e') {
-        setTool('rotate');
+        if (tool === 'parts') setPartEditMode('rotate');
+        else setTool('rotate');
       } else if (key === 'r') {
-        setTool('scale');
+        if (tool === 'parts') setPartEditMode('scale');
+        else setTool('scale');
       } else if (key === 'v') {
         setTool('select');
+      } else if (key === 'p') {
+        setTool('parts');
+        setPartEditMode('free');
       } else if (key === 'delete' || key === 'backspace') {
         removeSelected();
       }
@@ -299,9 +638,42 @@ export const App = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   });
 
+  const activateTransformTool = (nextTool: Exclude<PartEditMode, 'free'>) => {
+    if (tool === 'parts') {
+      if (partEditMode === nextTool) {
+        setPartEditMode('free');
+        setStatus('Free part mode');
+        return;
+      }
+      setPartEditMode(nextTool);
+      setStatus(`Part ${nextTool} mode`);
+      return;
+    }
+    if (tool === nextTool) {
+      setTool('select');
+      setStatus('Mode cleared');
+      return;
+    }
+    setTool(nextTool);
+  };
+
+  const togglePartsTool = () => {
+    if (tool === 'parts') {
+      setTool('select');
+      setPartEditMode('free');
+      setSelectedParts([]);
+      setStatus('Parts mode cleared');
+      return;
+    }
+    setTool('parts');
+    setPartEditMode('free');
+    setStatus('Parts mode');
+  };
+
   const selectNode = useCallback(
     (nodeId?: string) => {
       setDocument((current) => ({ ...current, selectedNodeId: nodeId }));
+      setSelectedParts([]);
       setStatus(nodeId ? 'Object selected' : 'Selection cleared');
     },
     [],
@@ -316,6 +688,7 @@ export const App = () => {
       },
       nextStatus,
     );
+    markWorkspaceNodesPending([node.id]);
   };
 
   const updateSelectedNode = (updater: (node: SceneNode) => SceneNode, nextStatus = 'Object updated') => {
@@ -331,6 +704,7 @@ export const App = () => {
       },
       nextStatus,
     );
+    markWorkspaceNodesPending([selectedNode.id]);
   };
 
   const updateSelectedNodeLive = (updater: (node: SceneNode) => SceneNode, nextStatus = 'Object updated') => {
@@ -347,6 +721,7 @@ export const App = () => {
         nodes: current.nodes.map((node) => (node.id === selectedNodeId ? updater(node) : node)),
       }),
     );
+    markWorkspaceNodesPending([selectedNodeId]);
     setStatus(nextStatus);
   };
 
@@ -477,9 +852,849 @@ export const App = () => {
         },
         'Transform committed',
       );
+      markWorkspaceNodesPending([nodeId]);
     },
-    [commit, document],
+    [commit, document, markWorkspaceNodesPending],
   );
+
+  const updateImportedPartTransforms = useCallback(
+    (updates: Array<{ nodeId: string; objectName: string; transform: Transform }>) => {
+      if (!updates.length) return;
+      const lockedTarget = updates.some((update) => document.nodes.find((node) => node.id === update.nodeId)?.locked);
+      if (lockedTarget) {
+        setStatus('Object is locked');
+        return;
+      }
+      const updatesByNode = new Map<string, Array<{ objectName: string; transform: Transform }>>();
+      updates.forEach((update) => {
+        const items = updatesByNode.get(update.nodeId) ?? [];
+        items.push({ objectName: update.objectName, transform: update.transform });
+        updatesByNode.set(update.nodeId, items);
+      });
+
+      commit(
+        {
+          ...document,
+          nodes: document.nodes.map((node) => {
+            const nodeUpdates = updatesByNode.get(node.id);
+            if (!nodeUpdates || node.geometry.kind !== 'imported-model') return node;
+            const existing = node.geometry.freePartTransforms ?? [];
+            const transformByName = new Map(existing.map((partTransform) => [partTransform.objectName, partTransform]));
+            nodeUpdates.forEach((update) => {
+              transformByName.set(update.objectName, {
+                objectName: update.objectName,
+                position: update.transform.position,
+                rotation: update.transform.rotation,
+                scale: update.transform.scale,
+              });
+            });
+
+            return {
+              ...node,
+              geometry: {
+                ...node.geometry,
+                freePartTransforms: [...transformByName.values()],
+              },
+            };
+          }),
+        },
+        updates.length === 1 ? 'Part moved' : 'Parts moved',
+      );
+      markWorkspaceNodesPending([...updatesByNode.keys()]);
+    },
+    [commit, document, markWorkspaceNodesPending],
+  );
+
+  const updatePartSelectionStatus = useCallback((selection: ImportedPartSelection[]) => {
+    setSelectedParts(selection);
+    const count = selection.length;
+    if (!count) {
+      if (tool === 'parts') setStatus('Part selection cleared');
+      return;
+    }
+    setStatus(count === 1 ? '1 part selected' : `${count} parts selected`);
+  }, [tool]);
+
+  const updateSelectedPartColor = useCallback(
+    (color: string) => {
+      if (!selectedParts.length) return;
+      const selectedByNode = new Map<string, Set<string>>();
+      selectedParts.forEach((part) => {
+        const names = selectedByNode.get(part.nodeId) ?? new Set<string>();
+        names.add(part.objectName);
+        selectedByNode.set(part.nodeId, names);
+      });
+
+      commit(
+        {
+          ...document,
+          nodes: document.nodes.map((node) => {
+            const names = selectedByNode.get(node.id);
+            if (!names || node.geometry.kind !== 'imported-model') return node;
+            const materialByName = new Map((node.geometry.partMaterials ?? []).map((partMaterial) => [partMaterial.objectName, partMaterial]));
+            names.forEach((objectName) => {
+              materialByName.set(objectName, {
+                objectName,
+                color,
+                roughness: node.material.roughness,
+                metalness: node.material.metalness,
+              });
+            });
+            return {
+              ...node,
+              geometry: {
+                ...node.geometry,
+                partMaterials: [...materialByName.values()],
+              },
+            };
+          }),
+        },
+        selectedParts.length === 1 ? 'Part color updated' : 'Part colors updated',
+      );
+      markWorkspaceNodesPending([...selectedByNode.keys()]);
+    },
+    [commit, document, markWorkspaceNodesPending, selectedParts],
+  );
+
+  const buildWarehouseItem = async (node: SceneNode, objectName: string, index: number): Promise<PartWarehousePartItem | undefined> => {
+    if (node.geometry.kind !== 'imported-model') return undefined;
+    const category = inferPartCategory(node.geometry.assetName, objectName);
+    const className = inferPartClassName(objectName);
+    const now = new Date().toISOString();
+    const independentGeometry = await createIndependentWarehousePartGeometry(node.geometry, node.material, objectName);
+    const item: PartWarehousePartItem = {
+      id: `part_${crypto.randomUUID().slice(0, 8)}`,
+      itemType: 'part',
+      code: makePartCode(category, className, (document.partWarehouse?.length ?? 0) + index),
+      name: cleanPartToken(objectName),
+      category,
+      className,
+      sourceNodeId: node.id,
+      sourceAssetName: node.geometry.assetName,
+      objectName,
+      geometry: independentGeometry,
+      material: { ...node.material },
+      metadata: {
+        sourceFormat: independentGeometry.kind,
+        originalBounds: independentGeometry.originalBounds,
+        storedAt: now,
+        updatedAt: now,
+      },
+    };
+    try {
+      const previewNode: SceneNode = {
+        id: `preview_${item.id}`,
+        name: item.name,
+        geometry: cloneGeometry(item.geometry),
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        material: { ...item.material },
+        visible: true,
+        locked: false,
+        createdAt: now,
+      };
+      const previewDocument: AssetDocument = {
+        ...document,
+        nodes: [previewNode],
+        selectedNodeId: previewNode.id,
+      };
+      item.thumbnailDataUrl = await blobToDataUrl(await renderDocumentPreview(previewDocument, 180));
+    } catch {
+      item.thumbnailDataUrl = undefined;
+    }
+    return item;
+  };
+
+  const buildStoredScenePartItem = async (node: SceneNode, index: number): Promise<PartWarehousePartItem | undefined> => {
+    if (node.geometry.kind !== 'serialized-object') return undefined;
+    const category = inferPartCategory(node.name, node.name);
+    const className = inferPartClassName(node.name);
+    const now = new Date().toISOString();
+    const item: PartWarehousePartItem = {
+      id: `part_${crypto.randomUUID().slice(0, 8)}`,
+      itemType: 'part',
+      code: makePartCode(category, className, (document.partWarehouse?.length ?? 0) + index),
+      name: node.name,
+      category,
+      className,
+      sourceNodeId: node.id,
+      sourceAssetName: node.geometry.assetName,
+      objectName: node.name,
+      geometry: cloneGeometry(node.geometry),
+      material: { ...node.material },
+      metadata: {
+        sourceFormat: 'serialized-object',
+        originalBounds: node.geometry.originalBounds,
+        storedAt: now,
+        updatedAt: now,
+      },
+    };
+    try {
+      const previewNode: SceneNode = {
+        ...node,
+        id: `preview_${item.id}`,
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        visible: true,
+      };
+      const previewDocument: AssetDocument = {
+        ...document,
+        nodes: [previewNode],
+        selectedNodeId: previewNode.id,
+      };
+      item.thumbnailDataUrl = await blobToDataUrl(await renderDocumentPreview(previewDocument, 180));
+    } catch {
+      item.thumbnailDataUrl = undefined;
+    }
+    return item;
+  };
+
+  const storePartsInWarehouse = async (mode: 'selected' | 'all') => {
+    if (!selectedNode || selectedNode.geometry.kind !== 'imported-model') return;
+    const objectNames =
+      mode === 'selected'
+        ? selectedParts.filter((part) => part.nodeId === selectedNode.id).map((part) => part.objectName)
+        : selectedNode.geometry.partObjectNames?.length
+          ? selectedNode.geometry.partObjectNames
+          : selectedNode.geometry.joints.map((joint) => joint.name);
+    const uniqueObjectNames = [...new Set(objectNames)].filter(Boolean);
+    if (!uniqueObjectNames.length) {
+      setStatus(mode === 'selected' ? 'Select parts first' : 'No parts detected');
+      return;
+    }
+
+    const nextItems: PartWarehousePartItem[] = [];
+    for (const [index, objectName] of uniqueObjectNames.entries()) {
+      setStatus(`Storing part ${index + 1}/${uniqueObjectNames.length}`);
+      try {
+        const item = await buildWarehouseItem(selectedNode, objectName, index);
+        if (item) nextItems.push(item);
+      } catch {
+        continue;
+      }
+    }
+
+    if (!nextItems.length) {
+      setStatus('No visible parts stored');
+      return;
+    }
+
+    commit(
+      {
+        ...document,
+        partWarehouse: [...(document.partWarehouse ?? []), ...nextItems],
+        selectedWarehouseItemId: nextItems[0]?.id ?? document.selectedWarehouseItemId,
+      },
+      nextItems.length === 1 ? 'Part stored' : `${nextItems.length} parts stored`,
+    );
+  };
+
+  const selectWarehouseItem = (itemId: string) => {
+    setDocument((current) => ({ ...current, selectedWarehouseItemId: itemId }));
+    setStatus('Warehouse part selected');
+  };
+
+  const loadPermanentWarehouseIntoProject = async () => {
+    setStatus('Loading saved warehouse...');
+    try {
+      const source = await loadWarehouseItemsWithFallback(document.metadata.id);
+      const items = await ensureWarehouseThumbnails(source.items);
+      if (!items.length) {
+        setStatus('No saved warehouse objects for this project');
+        refreshWarehouseStorageInfo();
+        return;
+      }
+
+      const currentItems = document.partWarehouse ?? [];
+      const mergedItems = mergeWarehouseItems(currentItems, items);
+      const added = mergedItems.length - currentItems.length;
+      const nextDocument = {
+        ...document,
+        metadata: source.fallback
+          ? {
+              ...document.metadata,
+              id: source.projectId,
+              updatedAt: new Date().toISOString(),
+            }
+          : document.metadata,
+        partWarehouse: mergedItems,
+        selectedWarehouseItemId: document.selectedWarehouseItemId ?? mergedItems[0]?.id,
+      };
+      commit(
+        nextDocument,
+        source.fallback
+          ? `${items.length} saved objects loaded from ${source.projectId}`
+          : added
+            ? `${added} saved objects loaded`
+            : 'Saved warehouse already loaded',
+      );
+      const storageInfo = await loadWarehouseStorageInfo(source.projectId);
+      setWarehouseStorageInfo(storageInfo);
+    } catch {
+      setStatus('Saved warehouse load failed');
+    }
+  };
+
+  const warehouseScenePosition = (offset = 0): [number, number, number] => {
+    const warehouseNodes = document.nodes.filter(
+      (node) => node.geometry.kind === 'serialized-object' || (node.geometry.kind === 'imported-model' && node.geometry.sourceFormat === 'glb'),
+    ).length + offset;
+    return [1.35 + (warehouseNodes % 3) * 0.75, 0, -0.75 + Math.floor(warehouseNodes / 3) * 0.55];
+  };
+
+  const buildWarehouseSceneNodes = async (item: PartWarehouseItem, offset = 0): Promise<SceneNode[]> => {
+    if (item.itemType === 'assembly') {
+      return item.assemblyNodes.map((node, index) => cloneStoredNode(node, offset + index));
+    }
+
+    let geometry = cloneGeometry(item.geometry);
+    if (geometry.kind === 'imported-model') {
+      setStatus('Preparing stored part for scene...');
+      try {
+        geometry = await createIndependentWarehousePartGeometry(geometry, item.material, item.objectName);
+      } catch {
+        setStatus('Stored part has no visible geometry');
+        return [];
+      }
+    }
+
+    return [
+      {
+        id: `node_${crypto.randomUUID().slice(0, 8)}`,
+        name: item.name,
+        geometry,
+        transform: {
+          position: warehouseScenePosition(offset),
+          rotation: [0, 0, 0],
+          scale: [1, 1, 1],
+        },
+        material: { ...item.material },
+        visible: true,
+        locked: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+  };
+
+  const renderWarehouseItemThumbnail = async (item: PartWarehouseItem) => {
+    const nodes = await buildWarehouseSceneNodes(item);
+    if (!nodes.length) return undefined;
+    const thumbnailDocument: AssetDocument = {
+      ...document,
+      nodes,
+      selectedNodeId: nodes[0]?.id,
+    };
+    return blobToDataUrl(await renderDocumentPreview(thumbnailDocument, 180));
+  };
+
+  const ensureWarehouseThumbnails = useCallback(
+    async (items: PartWarehouseItem[]) => {
+      const missingItems = items.filter((item) => !item.thumbnailDataUrl);
+      if (!missingItems.length) return items;
+
+      const thumbnailById = new Map<string, string>();
+      for (const item of missingItems) {
+        try {
+          const thumbnail = await renderWarehouseItemThumbnail(item);
+          if (thumbnail) {
+            thumbnailById.set(item.id, thumbnail);
+            void saveWarehouseThumbnail(document.metadata.id, item, thumbnail).catch(() => undefined);
+          }
+        } catch {
+          // Keep the item usable even if its preview cannot be rendered.
+        }
+      }
+
+      if (!thumbnailById.size) return items;
+      return items.map((item) => (thumbnailById.has(item.id) ? { ...item, thumbnailDataUrl: thumbnailById.get(item.id) } : item));
+    },
+    [document],
+  );
+
+  useEffect(() => {
+    const currentItems = document.partWarehouse ?? [];
+    if (!currentItems.some((item) => !item.thumbnailDataUrl)) return;
+
+    let cancelled = false;
+    void ensureWarehouseThumbnails(currentItems).then((itemsWithThumbnails) => {
+      if (cancelled || !itemsWithThumbnails.some((item) => item.thumbnailDataUrl)) return;
+      setDocument((current) => ({
+        ...current,
+        partWarehouse: (current.partWarehouse ?? []).map((item) => {
+          const hydrated = itemsWithThumbnails.find((candidate) => candidate.id === item.id);
+          return hydrated?.thumbnailDataUrl && !item.thumbnailDataUrl ? { ...item, thumbnailDataUrl: hydrated.thumbnailDataUrl } : item;
+        }),
+      }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [document.partWarehouse, ensureWarehouseThumbnails]);
+
+  const importFirstPermanentWarehouseObject = async () => {
+    setActiveView('workspace');
+    setStatus('Importing saved warehouse object...');
+    try {
+      const source = await loadWarehouseItemsWithFallback(document.metadata.id);
+      const items = await ensureWarehouseThumbnails(source.items);
+      const item = items[0];
+      if (!item) {
+        setStatus('No saved warehouse objects for this project');
+        return;
+      }
+
+      const nodes = await buildWarehouseSceneNodes(item);
+      if (!nodes.length) return;
+      commit(
+        {
+          ...document,
+          metadata: source.fallback
+            ? {
+                ...document.metadata,
+                id: source.projectId,
+                updatedAt: new Date().toISOString(),
+              }
+            : document.metadata,
+          partWarehouse: mergeWarehouseItems(document.partWarehouse ?? [], items),
+          nodes: [...document.nodes, ...nodes],
+          selectedNodeId: nodes[0]?.id ?? document.selectedNodeId,
+        },
+        source.fallback ? `Saved object imported from ${source.projectId}` : 'Saved object imported',
+      );
+      const storageInfo = await loadWarehouseStorageInfo(source.projectId);
+      setWarehouseStorageInfo(storageInfo);
+    } catch {
+      setStatus('Saved object import failed');
+    }
+  };
+
+  const addWarehouseItemToScene = async (item: PartWarehouseItem) => {
+    setWarehouseMenu(undefined);
+    setActiveView('workspace');
+    const nodes = await buildWarehouseSceneNodes(item);
+    if (!nodes.length) return;
+    commit(
+      {
+        ...document,
+        nodes: [...document.nodes, ...nodes],
+        selectedNodeId: nodes[0]?.id ?? document.selectedNodeId,
+      },
+      item.itemType === 'assembly' ? 'Warehouse assembly added' : 'Warehouse part added',
+    );
+  };
+
+  const addAllWarehouseItemsToScene = async () => {
+    const items = document.partWarehouse ?? [];
+    if (!items.length) {
+      setStatus('No warehouse objects to import');
+      return;
+    }
+
+    setActiveView('workspace');
+    setStatus('Importing saved objects...');
+    const nodes: SceneNode[] = [];
+    for (const item of items) {
+      nodes.push(...(await buildWarehouseSceneNodes(item, nodes.length)));
+    }
+    if (!nodes.length) return;
+    commit(
+      {
+        ...document,
+        nodes: [...document.nodes, ...nodes],
+        selectedNodeId: nodes[0]?.id ?? document.selectedNodeId,
+      },
+      `${nodes.length} warehouse objects imported`,
+    );
+  };
+
+  const deleteWarehouseItem = (itemId: string) => {
+    const itemToDelete = document.partWarehouse?.find((item) => item.id === itemId);
+    commit(
+      {
+        ...document,
+        partWarehouse: (document.partWarehouse ?? []).filter((item) => item.id !== itemId),
+        selectedWarehouseItemId: document.selectedWarehouseItemId === itemId ? undefined : document.selectedWarehouseItemId,
+      },
+      'Warehouse item deleted',
+    );
+    if (itemToDelete) {
+      deletePersistentWarehouseItem(document.metadata.id, itemToDelete)
+        .then(() => void refreshWarehouseStorageInfo())
+        .catch(() => setStatus('Warehouse item deleted locally'));
+    }
+    setWarehouseMenu(undefined);
+  };
+
+  const warehouseItemForWorkspaceNode = (node: SceneNode) =>
+    (document.partWarehouse ?? []).find((item) => {
+      if (item.metadata.storageKey === `workspace-${node.id}`) return true;
+      if (item.itemType === 'part' && node.geometry.kind === 'imported-model' && item.metadata.storageFileName === node.geometry.assetName) return true;
+      if (item.itemType === 'part' && node.geometry.kind === 'serialized-object' && item.name === node.name) return true;
+      if (item.itemType === 'assembly' && item.name === node.name) return true;
+      return false;
+    });
+
+  const deleteWorkspaceObjectPermanent = async (nodeId: string) => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    if (!node) {
+      setStatus('Scene object not found');
+      return;
+    }
+    if (node.locked) {
+      setStatus('Object is locked');
+      return;
+    }
+
+    const warehouseItem = warehouseItemForWorkspaceNode(node);
+    commit(
+      {
+        ...document,
+        nodes: document.nodes.filter((item) => item.id !== nodeId),
+        selectedNodeId: document.selectedNodeId === nodeId ? undefined : document.selectedNodeId,
+        partWarehouse: warehouseItem ? (document.partWarehouse ?? []).filter((item) => item.id !== warehouseItem.id) : document.partWarehouse,
+        selectedWarehouseItemId: warehouseItem && document.selectedWarehouseItemId === warehouseItem.id ? undefined : document.selectedWarehouseItemId,
+      },
+      warehouseItem ? 'Workspace object deleted permanently' : 'Workspace object deleted',
+    );
+    clearPendingWorkspaceNodes([nodeId]);
+    setWorkspaceMenu(undefined);
+
+    if (warehouseItem) {
+      await deletePersistentWarehouseItem(document.metadata.id, warehouseItem).catch(() => undefined);
+      await refreshWarehouseStorageInfo();
+    }
+  };
+
+  const saveWarehouseItemsPermanent = async (items: PartWarehouseItem[], label: string) => {
+    if (!items.length) {
+      setStatus('No warehouse items to save');
+      return;
+    }
+
+    setStatus(`Saving ${label} to permanent warehouse...`);
+    try {
+      let result = { saved: 0, skipped: 0 };
+      for (const item of items) {
+        const nodes = await buildWarehouseSceneNodes(item);
+        if (!nodes.length) continue;
+        const glb = await exportDocumentAsGlb({
+          ...document,
+          nodes,
+          selectedNodeId: nodes[0]?.id,
+        });
+        const saved = await saveWarehouseGlbItem(document.metadata.id, item, glb, { overwrite: Boolean(item.metadata.storageKey) });
+        result = {
+          saved: result.saved + saved.saved,
+          skipped: result.skipped + saved.skipped,
+        };
+      }
+      await refreshWarehouseStorageInfo();
+      if (result.saved) {
+        setStatus(`${result.saved} saved permanently${result.skipped ? `, ${result.skipped} already saved` : ''}`);
+      } else {
+        setStatus(`${result.skipped} already saved`);
+      }
+    } catch {
+      setStatus('Permanent warehouse save failed');
+    }
+  };
+
+  const saveSelectedWarehousePermanent = () => {
+    if (!selectedWarehouseItem) {
+      setStatus('Select a warehouse item first');
+      return;
+    }
+    void saveWarehouseItemsPermanent([selectedWarehouseItem], 'selected item');
+  };
+
+  const saveAllWarehousePermanent = () => {
+    void saveWarehouseItemsPermanent(document.partWarehouse ?? [], 'all items');
+  };
+
+  const exportWarehouseProject = () => {
+    const items = warehouseStorageInfo.savedItems;
+    if (!items.length) {
+      setStatus('Warehouse is empty');
+      return;
+    }
+    const payload = {
+      schemaVersion: 1,
+      kind: '3d-asset-forge.warehouse-manifest',
+      exportedAt: new Date().toISOString(),
+      project: {
+        id: document.metadata.id,
+        name: document.metadata.name,
+      },
+      storage: {
+        directory: `project-warehouse/${document.metadata.id}`,
+        usageBytes: warehouseStorageInfo.usageBytes,
+      },
+      items,
+    };
+    downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), `${document.metadata.name.replace(/\s+/g, '-').toLowerCase()}-warehouse.json`);
+    setStatus('Warehouse manifest exported');
+  };
+
+  const importWarehouseProject = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as { kind?: string; items?: PartWarehouseItem[] };
+        if (parsed.kind !== '3d-asset-forge.warehouse' || !Array.isArray(parsed.items)) {
+          throw new Error('Invalid warehouse file.');
+        }
+        const importedItems = parsed.items.map((item, index) => cloneWarehouseItemForImport(item, (document.partWarehouse?.length ?? 0) + index));
+        commit(
+          {
+            ...document,
+            partWarehouse: [...(document.partWarehouse ?? []), ...importedItems],
+            selectedWarehouseItemId: importedItems[0]?.id ?? document.selectedWarehouseItemId,
+          },
+          `${importedItems.length} warehouse items imported`,
+        );
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : 'Warehouse import failed');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  };
+
+  const storableSceneNodes = () => document.nodes.filter((node) => node.geometry.kind === 'imported-model' || node.geometry.kind === 'serialized-object');
+
+  const storeScenePartsSeparately = async () => {
+    const sceneNodes = storableSceneNodes();
+    const pendingParts = sceneNodes.flatMap((node) => {
+        if (node.geometry.kind === 'serialized-object') return [{ node, objectName: node.name, index: 0 }];
+        if (node.geometry.kind !== 'imported-model') return [];
+        const names = node.geometry.isolatedObjectNames?.length
+          ? node.geometry.isolatedObjectNames
+          : node.geometry.partObjectNames?.length
+            ? node.geometry.partObjectNames
+            : node.geometry.joints.map((joint) => joint.name);
+        return [...new Set(names)].map((objectName, index) => ({ node, objectName, index }));
+      });
+    const nextItems: PartWarehousePartItem[] = [];
+    for (const [partIndex, part] of pendingParts.entries()) {
+      setStatus(`Storing scene part ${partIndex + 1}/${pendingParts.length}`);
+      try {
+        const item =
+          part.node.geometry.kind === 'serialized-object'
+            ? await buildStoredScenePartItem(part.node, part.index)
+            : await buildWarehouseItem(part.node, part.objectName, part.index);
+        if (item) nextItems.push(item);
+      } catch {
+        continue;
+      }
+    }
+
+    if (!nextItems.length) {
+      setStatus('No scene parts to store');
+      return;
+    }
+
+    commit(
+      {
+        ...document,
+        partWarehouse: [...(document.partWarehouse ?? []), ...nextItems],
+        selectedWarehouseItemId: nextItems[0].id,
+      },
+      `${nextItems.length} scene parts stored`,
+    );
+  };
+
+  const buildSceneAssemblyWarehouseItem = async (nodes: SceneNode[], name?: string, storageKey?: string): Promise<PartWarehouseAssemblyItem | undefined> => {
+    if (!nodes.length) return undefined;
+    const now = new Date().toISOString();
+    const item: PartWarehouseAssemblyItem = {
+      id: `assembly_${crypto.randomUUID().slice(0, 8)}`,
+      itemType: 'assembly' as const,
+      code: makePartCode('Assemblies', 'Composite', document.partWarehouse?.length ?? 0),
+      name:
+        name ??
+        `Scene Assembly ${String((document.partWarehouse ?? []).filter((entry) => entry.itemType === 'assembly').length + 1).padStart(2, '0')}`,
+      category: 'Assemblies' as const,
+      className: 'Composite',
+      sourceAssetName: document.metadata.name,
+      assemblyNodes: nodes.map((node) => cloneStoredNode(node)),
+      metadata: {
+        sourceFormat: 'assembly' as const,
+        originalBounds: sceneAssemblyBounds(nodes),
+        storedAt: now,
+        updatedAt: now,
+        storageKey,
+        storageProjectId: storageKey ? document.metadata.id : undefined,
+      },
+    };
+    try {
+      const previewDocument: AssetDocument = {
+        ...document,
+        nodes: item.assemblyNodes.map((node, index) => cloneStoredNode(node, index)),
+        selectedNodeId: item.assemblyNodes[0]?.id,
+      };
+      item.thumbnailDataUrl = await blobToDataUrl(await renderDocumentPreview(previewDocument, 180));
+    } catch {
+      item.thumbnailDataUrl = undefined;
+    }
+    return item;
+  };
+
+  const buildWorkspaceNodeWarehouseItem = async (node: SceneNode): Promise<PartWarehouseItem | undefined> => {
+    const storageKey = `workspace-${node.id}`;
+    if (node.geometry.kind === 'serialized-object') {
+      const item = await buildStoredScenePartItem(node, document.partWarehouse?.length ?? 0);
+      if (!item) return undefined;
+      return {
+        ...item,
+        metadata: {
+          ...item.metadata,
+          storageKey,
+          storageProjectId: document.metadata.id,
+        },
+      };
+    }
+
+    if (node.geometry.kind === 'imported-model') {
+      return buildSceneAssemblyWarehouseItem([node], node.name, storageKey);
+    }
+
+    return buildSceneAssemblyWarehouseItem([node], node.name, storageKey);
+  };
+
+  const storeSceneAssembly = async () => {
+    const nodes = storableSceneNodes();
+    if (nodes.length < 2) {
+      setStatus('Add at least two scene parts');
+      return;
+    }
+
+    const item = await buildSceneAssemblyWarehouseItem(nodes);
+    if (!item) return;
+
+    commit(
+      {
+        ...document,
+        partWarehouse: [...(document.partWarehouse ?? []), item],
+        selectedWarehouseItemId: item.id,
+      },
+      'Scene assembly stored',
+    );
+  };
+
+  const saveWorkspaceItemPermanent = async (nodeId: string) => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    if (!node) {
+      setStatus('Scene object not found');
+      return;
+    }
+
+    setWorkspaceMenu(undefined);
+    setStatus('Saving workspace object...');
+    const item = await buildWorkspaceNodeWarehouseItem(node);
+
+    if (!item) {
+      setStatus('This object cannot be stored in warehouse');
+      return;
+    }
+
+    const nextWarehouse = mergeWarehouseItems(document.partWarehouse ?? [], [item]);
+    commit(
+      {
+        ...document,
+        partWarehouse: nextWarehouse,
+        selectedWarehouseItemId: item.id,
+      },
+      'Workspace object stored',
+    );
+    await saveWarehouseItemsPermanent([item], 'workspace object');
+    clearPendingWorkspaceNodes([nodeId]);
+  };
+
+  const savePendingWorkspaceChanges = async () => {
+    const pendingNodes = pendingWorkspaceNodeIds
+      .map((nodeId) => document.nodes.find((node) => node.id === nodeId))
+      .filter((node): node is SceneNode => Boolean(node));
+    if (!pendingNodes.length) {
+      setStatus('No workspace changes to save');
+      setPendingWorkspaceNodeIds([]);
+      return;
+    }
+
+    setStatus(`Saving ${pendingNodes.length} workspace change${pendingNodes.length === 1 ? '' : 's'}...`);
+    const items: PartWarehouseItem[] = [];
+    for (const node of pendingNodes) {
+      const item = await buildWorkspaceNodeWarehouseItem(node);
+      if (item) items.push(item);
+    }
+
+    if (!items.length) {
+      setStatus('No savable workspace objects');
+      return;
+    }
+
+    const nextWarehouse = mergeWarehouseItems(document.partWarehouse ?? [], items);
+    commit(
+      {
+        ...document,
+        partWarehouse: nextWarehouse,
+        selectedWarehouseItemId: items[0]?.id ?? document.selectedWarehouseItemId,
+      },
+      'Workspace changes stored',
+    );
+    await saveWarehouseItemsPermanent(items, 'workspace changes');
+    clearPendingWorkspaceNodes(pendingNodes.map((node) => node.id));
+  };
+
+  const saveWorkspaceAssemblyPermanent = async () => {
+    const nodes = storableSceneNodes();
+    if (!nodes.length) {
+      setStatus('No scene objects to store');
+      return;
+    }
+
+    setWorkspaceMenu(undefined);
+    setStatus('Saving workspace assembly...');
+    const item = await buildSceneAssemblyWarehouseItem(nodes);
+    if (!item) return;
+    const nextWarehouse = mergeWarehouseItems(document.partWarehouse ?? [], [item]);
+    commit(
+      {
+        ...document,
+        partWarehouse: nextWarehouse,
+        selectedWarehouseItemId: item.id,
+      },
+      'Workspace assembly stored',
+    );
+    await saveWarehouseItemsPermanent([item], 'workspace assembly');
+  };
+
+  const updateWarehouseItemFromSelection = async (copy: boolean) => {
+    if (!selectedWarehouseItem || selectedWarehouseItem.itemType !== 'part' || !selectedNode) return;
+    const nextItem =
+      selectedNode.geometry.kind === 'serialized-object'
+        ? await buildStoredScenePartItem(selectedNode, 0)
+        : selectedNode.geometry.kind === 'imported-model'
+          ? await buildWarehouseItem(selectedNode, selectedParts.find((part) => part.nodeId === selectedNode.id)?.objectName ?? selectedNode.geometry.isolatedObjectNames?.[0] ?? '', 0)
+          : undefined;
+    if (!nextItem) return;
+    const itemToStore = copy
+      ? { ...nextItem, name: `${nextItem.name} Copy`, code: makePartCode(nextItem.category, nextItem.className, document.partWarehouse?.length ?? 0) }
+      : { ...nextItem, id: selectedWarehouseItem.id, code: selectedWarehouseItem.code, metadata: { ...nextItem.metadata, storedAt: selectedWarehouseItem.metadata.storedAt } };
+
+    commit(
+      {
+        ...document,
+        partWarehouse: copy
+          ? [...(document.partWarehouse ?? []), itemToStore]
+          : (document.partWarehouse ?? []).map((item) => (item.id === selectedWarehouseItem.id ? itemToStore : item)),
+        selectedWarehouseItemId: itemToStore.id,
+      },
+      copy ? 'Warehouse copy created' : 'Warehouse part updated',
+    );
+    await saveWarehouseItemsPermanent([itemToStore], copy ? 'warehouse copy' : 'warehouse item');
+  };
 
   const undo = () => {
     const previous = past[past.length - 1];
@@ -581,7 +1796,20 @@ export const App = () => {
     try {
       setStatus(`Importing ${file.name}...`);
       const node = await createImportedModelNode(file);
-      addNode(node, node.geometry.kind === 'imported-model' && node.geometry.joints.length ? 'Articulated model imported' : 'Static model imported');
+      const replacingStarterPlaceholder = document.nodes.length === 1 && isStarterPlaceholderNode(document.nodes[0]);
+      if (replacingStarterPlaceholder) {
+        commit(
+          {
+            ...document,
+            nodes: [node],
+            selectedNodeId: node.id,
+          },
+          node.geometry.kind === 'imported-model' && node.geometry.joints.length ? 'Articulated model imported' : 'Static model imported',
+        );
+        markWorkspaceNodesPending([node.id]);
+      } else {
+        addNode(node, node.geometry.kind === 'imported-model' && node.geometry.joints.length ? 'Articulated model imported' : 'Static model imported');
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'GLB import failed');
     } finally {
@@ -603,6 +1831,7 @@ export const App = () => {
       },
       'Object deleted',
     );
+    clearPendingWorkspaceNodes([selectedNode.id]);
   };
 
   const duplicateSelected = () => {
@@ -616,6 +1845,7 @@ export const App = () => {
       },
       'Object duplicated',
     );
+    markWorkspaceNodesPending([copy.id]);
   };
 
   const toggleSelectedVisibility = () => {
@@ -791,31 +2021,74 @@ export const App = () => {
   };
 
   const setImportedJointMotion = (jointName: string, value: number) => {
-    updateSelectedNodeLive(
+    if (!selectedNode) return;
+    setImportedJointMotionForNode(selectedNode.id, jointName, value);
+  };
+
+  const setImportedJointMotionForNode = (nodeId: string, jointName: string, value: number) => {
+    setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
+    setDocument((current) =>
+      touch({
+        ...current,
+        selectedNodeId: nodeId,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
+
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              joints: node.geometry.joints.map((joint) => {
+                if (joint.name !== jointName) return joint;
+                const axis = joint.axis === 'y' ? 1 : joint.axis === 'z' ? 2 : 0;
+                const rotation: [number, number, number] = [0, 0, 0];
+                const translation: [number, number, number] = [0, 0, 0];
+                if (joint.motionKind === 'translation') translation[axis] = value;
+                else rotation[axis] = value;
+                return {
+                  ...joint,
+                  rotation,
+                  translation,
+                };
+              }),
+            },
+          };
+        }),
+      }),
+    );
+    markWorkspaceNodesPending([nodeId]);
+    setStatus('Joint adjusted');
+  };
+
+  const resetImportedJointPose = () => {
+    setDemoMotionNodeId(undefined);
+    setMotionTrainer(undefined);
+    setSelectedParts([]);
+    setTool('select');
+    setPartEditMode('free');
+    updateSelectedNode(
       (node) => {
         if (node.geometry.kind !== 'imported-model') return node;
-
         return {
           ...node,
+          transform: {
+            ...node.transform,
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+          },
           geometry: {
             ...node.geometry,
-            joints: node.geometry.joints.map((joint) => {
-              if (joint.name !== jointName) return joint;
-              const axis = joint.axis === 'y' ? 1 : joint.axis === 'z' ? 2 : 0;
-              const rotation: [number, number, number] = [0, 0, 0];
-              const translation: [number, number, number] = [0, 0, 0];
-              if (joint.motionKind === 'translation') translation[axis] = value;
-              else rotation[axis] = value;
-              return {
-                ...joint,
-                rotation,
-                translation,
-              };
-            }),
+            joints: node.geometry.joints.map((joint) => ({
+              ...joint,
+              rotation: [0, 0, 0],
+              translation: [0, 0, 0],
+            })),
+            freePartTransforms: [],
+            partMaterials: [],
           },
         };
       },
-      'Joint adjusted',
+      'Factory state restored',
     );
   };
 
@@ -886,6 +2159,15 @@ export const App = () => {
           <input ref={fileInputRef} type="file" accept=".json,.forge.json" hidden onChange={openProjectFile} />
         </div>
 
+        <div className="toolbar-group segmented">
+          <button className={activeView === 'workspace' ? 'active' : ''} title="Workspace" onClick={() => setActiveView('workspace')}>
+            <Focus size={17} />
+          </button>
+          <button className={activeView === 'warehouse' ? 'active' : ''} title="Warehouse dashboard" onClick={() => setActiveView('warehouse')}>
+            <Grid3X3 size={17} />
+          </button>
+        </div>
+
         <div className="toolbar-group">
           <button title="Undo" disabled={!past.length} onClick={undo}>
             <Undo2 size={18} />
@@ -899,14 +2181,17 @@ export const App = () => {
           <button className={tool === 'select' ? 'active' : ''} title="Select" onClick={() => setTool('select')}>
             <Square size={17} />
           </button>
-          <button className={tool === 'translate' ? 'active' : ''} title="Move" onClick={() => setTool('translate')}>
+          <button className={tool === 'translate' || (tool === 'parts' && partEditMode === 'translate') ? 'active' : ''} title="Move" onClick={() => activateTransformTool('translate')}>
             <Move3D size={18} />
           </button>
-          <button className={tool === 'rotate' ? 'active' : ''} title="Rotate" onClick={() => setTool('rotate')}>
+          <button className={tool === 'rotate' || (tool === 'parts' && partEditMode === 'rotate') ? 'active' : ''} title="Rotate" onClick={() => activateTransformTool('rotate')}>
             <RotateCw size={18} />
           </button>
-          <button className={tool === 'scale' ? 'active' : ''} title="Scale" onClick={() => setTool('scale')}>
+          <button className={tool === 'scale' || (tool === 'parts' && partEditMode === 'scale') ? 'active' : ''} title="Scale" onClick={() => activateTransformTool('scale')}>
             <Scaling size={18} />
+          </button>
+          <button className={tool === 'parts' ? 'active' : ''} title="Parts" onClick={togglePartsTool}>
+            <Cuboid size={18} />
           </button>
         </div>
 
@@ -923,6 +2208,34 @@ export const App = () => {
           <button className={snapEnabled ? 'active' : ''} title="Toggle snapping" onClick={() => setSnapEnabled((value) => !value)}>
             <Magnet size={17} />
           </button>
+          <button
+            title="Dismantle selected model into warehouse"
+            disabled={!selectedNode || selectedNode.geometry.kind !== 'imported-model' || !selectedNode.geometry.joints.length}
+            onClick={() => storePartsInWarehouse('all')}
+          >
+            <Cuboid size={17} />
+          </button>
+          <button title="Import saved warehouse object to workspace" onClick={importFirstPermanentWarehouseObject}>
+            <Import size={17} />
+          </button>
+          <button
+            className={pendingWorkspaceNodeIds.length ? 'active' : ''}
+            title="Save workspace changes permanently"
+            disabled={!pendingWorkspaceNodeIds.length}
+            onClick={savePendingWorkspaceChanges}
+          >
+            <Save size={17} />
+            <span>{pendingWorkspaceNodeIds.length}</span>
+          </button>
+          <button title="Save selected object as project warehouse GLB" disabled={!selectedNode} onClick={() => selectedNode && saveWorkspaceItemPermanent(selectedNode.id)}>
+            <Save size={17} />
+          </button>
+          <button title="Delete selected object permanently" disabled={!selectedNode} onClick={() => selectedNode && deleteWorkspaceObjectPermanent(selectedNode.id)}>
+            <Trash2 size={17} />
+          </button>
+          <button title="Restore imported model factory state" disabled={!selectedNode || selectedNode.geometry.kind !== 'imported-model'} onClick={resetImportedJointPose}>
+            <RotateCw size={17} />
+          </button>
         </div>
 
         <div className="toolbar-group push-right">
@@ -937,7 +2250,8 @@ export const App = () => {
         </div>
       </header>
 
-      <section className="workbench">
+      {activeView === 'workspace' ? (
+      <section className="workbench" onClick={() => setWorkspaceMenu(undefined)}>
         <aside className="left-panel panel">
           <section>
             <h2>Scene</h2>
@@ -998,6 +2312,30 @@ export const App = () => {
           </section>
 
           <section>
+            <h2>Saved Objects</h2>
+            <div className="saved-object-actions">
+              <button title="Load saved project warehouse objects" onClick={loadPermanentWarehouseIntoProject}>
+                <FolderOpen size={16} />
+                <span>Load Saved</span>
+              </button>
+              <button title="Import all visible warehouse objects to workspace" disabled={!(document.partWarehouse?.length)} onClick={addAllWarehouseItemsToScene}>
+                <Import size={16} />
+                <span>Import All</span>
+              </button>
+            </div>
+            <div className="saved-object-list">
+              {(document.partWarehouse ?? []).slice(0, 12).map((item) => (
+                <button key={`workspace-${item.id}`} className="saved-object-item" title={`Import ${item.name}`} onClick={() => addWarehouseItemToScene(item)}>
+                  {item.thumbnailDataUrl ? <img src={item.thumbnailDataUrl} alt="" /> : <Cuboid size={18} />}
+                  <span>{item.name}</span>
+                  <small>{item.itemType === 'assembly' ? `${item.assemblyNodes.length} parts` : item.code}</small>
+                </button>
+              ))}
+              {!(document.partWarehouse?.length) && <div className="empty-state compact">No saved objects loaded.</div>}
+            </div>
+          </section>
+
+          <section>
             <h2>Generators</h2>
             <div className="generator-list">
               {generatorDefinitions.map((generator) => (
@@ -1014,11 +2352,16 @@ export const App = () => {
         <ThreeViewport
           document={document}
           tool={tool}
+          partEditMode={partEditMode}
           snapEnabled={snapEnabled}
           motionDemoNodeId={demoMotionNodeId}
           motionTrainingPreview={motionTrainingPreview}
           onSelect={selectNode}
           onTransformCommit={updateNodeTransform}
+          onImportedPartTransformsCommit={updateImportedPartTransforms}
+          onJointPoseChange={setImportedJointMotionForNode}
+          onPartSelectionChange={updatePartSelectionStatus}
+          onNodeContextMenu={({ nodeId, x, y }) => setWorkspaceMenu({ nodeId, x, y })}
           onStatsChange={setStats}
         />
 
@@ -1075,10 +2418,122 @@ export const App = () => {
                 <Slider label="Metalness" value={selectedNode.material.metalness} min={0} max={1} step={0.01} onChange={(value) => setMaterialValue('metalness', value)} />
               </section>
 
+              {selectedNode.geometry.kind === 'imported-model' && (
+                <section>
+                  <div className="section-title-row">
+                    <h3>Parts Editor</h3>
+                    <span className="part-selection-count">{selectedPartsForSelectedNode.length} selected</span>
+                  </div>
+                  <div className="part-mode-controls">
+                    <button className={tool === 'parts' && partEditMode === 'free' ? 'active' : ''} title="Free part drag" onClick={() => {
+                      if (tool === 'parts' && partEditMode === 'free') {
+                        setTool('select');
+                        setStatus('Parts mode cleared');
+                        return;
+                      }
+                      setTool('parts');
+                      setPartEditMode('free');
+                    }}>
+                      <Cuboid size={16} />
+                    </button>
+                    <button className={tool === 'parts' && partEditMode === 'translate' ? 'active' : ''} title="Part move" onClick={() => {
+                      setTool('parts');
+                      setPartEditMode('translate');
+                    }}>
+                      <Move3D size={16} />
+                    </button>
+                    <button className={tool === 'parts' && partEditMode === 'rotate' ? 'active' : ''} title="Part rotate" onClick={() => {
+                      setTool('parts');
+                      setPartEditMode('rotate');
+                    }}>
+                      <RotateCw size={16} />
+                    </button>
+                    <button className={tool === 'parts' && partEditMode === 'scale' ? 'active' : ''} title="Part scale" onClick={() => {
+                      setTool('parts');
+                      setPartEditMode('scale');
+                    }}>
+                      <Scaling size={16} />
+                    </button>
+                  </div>
+                  <div className="material-presets expanded">
+                    {materialPresets.map((preset) => (
+                      <button
+                        key={`part-${preset.name}`}
+                        title={`Apply ${preset.name} to selected parts`}
+                        className="swatch"
+                        disabled={!selectedPartsForSelectedNode.length}
+                        style={{ backgroundColor: preset.color }}
+                        onClick={() => updateSelectedPartColor(preset.color)}
+                      >
+                        <Palette size={14} />
+                      </button>
+                    ))}
+                  </div>
+                  <label className="field-row">
+                    <span>Part color</span>
+                    <input type="color" disabled={!selectedPartsForSelectedNode.length} onChange={(event) => updateSelectedPartColor(event.target.value)} />
+                  </label>
+                  <div className="part-store-actions">
+                    <button title="Store selected parts" disabled={!selectedPartsForSelectedNode.length} onClick={() => storePartsInWarehouse('selected')}>
+                      <Save size={16} />
+                      <span>Store Selected</span>
+                    </button>
+                    <button
+                      title="Update selected warehouse part from current scene piece"
+                      disabled={!selectedWarehouseItem || selectedWarehouseItem.itemType !== 'part' || !selectedNode}
+                      onClick={() => updateWarehouseItemFromSelection(false)}
+                    >
+                      <Save size={16} />
+                      <span>Update Stored</span>
+                    </button>
+                    <button
+                      title="Save modified scene piece as new warehouse part"
+                      disabled={!selectedWarehouseItem || selectedWarehouseItem.itemType !== 'part' || !selectedNode}
+                      onClick={() => updateWarehouseItemFromSelection(true)}
+                    >
+                      <Copy size={16} />
+                      <span>Save Copy</span>
+                    </button>
+                    <button title="Dismantle detected model parts into warehouse" disabled={!selectedNode.geometry.joints.length} onClick={() => storePartsInWarehouse('all')}>
+                      <Cuboid size={16} />
+                      <span>Dismantle Model</span>
+                    </button>
+                  </div>
+                </section>
+              )}
+
+              {selectedNode.geometry.kind === 'serialized-object' && (
+                <section>
+                  <div className="section-title-row">
+                    <h3>Stored Part</h3>
+                    <span className="part-selection-count">Warehouse object</span>
+                  </div>
+                  <div className="part-store-actions">
+                    <button
+                      title="Update selected warehouse part from current scene piece"
+                      disabled={!selectedWarehouseItem || selectedWarehouseItem.itemType !== 'part'}
+                      onClick={() => updateWarehouseItemFromSelection(false)}
+                    >
+                      <Save size={16} />
+                      <span>Update Stored</span>
+                    </button>
+                    <button
+                      title="Save modified scene piece as new warehouse part"
+                      disabled={!selectedWarehouseItem || selectedWarehouseItem.itemType !== 'part'}
+                      onClick={() => updateWarehouseItemFromSelection(true)}
+                    >
+                      <Copy size={16} />
+                      <span>Save Copy</span>
+                    </button>
+                  </div>
+                </section>
+              )}
+
               <GeometryInspector
                 node={selectedNode}
                 setGeometryValue={setGeometryValue}
                 setImportedJointMotion={setImportedJointMotion}
+                resetImportedJointPose={resetImportedJointPose}
                 normalizeImportedModel={normalizeImportedModel}
                 demoActive={demoMotionNodeId === selectedNode.id}
                 toggleImportedMotionDemo={toggleImportedMotionDemo}
@@ -1164,6 +2619,174 @@ export const App = () => {
           </section>
         </aside>
       </section>
+      ) : (
+
+      <section className="warehouse-dashboard" onClick={() => setWarehouseMenu(undefined)}>
+        <div className="warehouse-dashboard-head">
+          <div>
+            <h2>Parts Warehouse</h2>
+            <p>
+              {document.partWarehouse?.length ?? 0} visible items | {warehouseStorageInfo.items} saved | {formatGigabytes(warehouseStorageInfo.usageBytes)}
+              {warehouseStorageInfo.quotaBytes ? ` / ${formatGigabytes(warehouseStorageInfo.quotaBytes)}` : ''}
+            </p>
+            <div className="warehouse-storage-ledger">
+              {warehouseStorageInfo.savedItems.length ? (
+                warehouseStorageInfo.savedItems.map((item, index) => (
+                  <span key={`${item.name}-${item.savedAt}-${index}`}>
+                    {item.name} | {item.itemType} | {formatGigabytes(item.sizeBytes)}
+                  </span>
+                ))
+              ) : (
+                <span>No permanent objects saved for this project</span>
+              )}
+            </div>
+          </div>
+          <div className="warehouse-dashboard-actions">
+            <button title="Send selected warehouse item to scene" disabled={!selectedWarehouseItem} onClick={() => selectedWarehouseItem && addWarehouseItemToScene(selectedWarehouseItem)}>
+              <Import size={16} />
+              <span>To Scene</span>
+            </button>
+            <button title="Delete selected warehouse item" disabled={!selectedWarehouseItem} onClick={() => selectedWarehouseItem && deleteWarehouseItem(selectedWarehouseItem.id)}>
+              <Trash2 size={16} />
+              <span>Delete</span>
+            </button>
+            <button title="Save selected item permanently in this project warehouse" disabled={!selectedWarehouseItem} onClick={saveSelectedWarehousePermanent}>
+              <Save size={16} />
+              <span>Save Item</span>
+            </button>
+            <button title="Save all new warehouse items permanently in this project warehouse" disabled={!(document.partWarehouse?.length)} onClick={saveAllWarehousePermanent}>
+              <ShieldCheck size={16} />
+              <span>Save All</span>
+            </button>
+            <button title="Load permanent project warehouse objects" onClick={loadPermanentWarehouseIntoProject}>
+              <FolderOpen size={16} />
+              <span>Load Saved</span>
+            </button>
+            <button
+              title="Save current scene imported parts separately"
+              disabled={!document.nodes.some((node) => node.geometry.kind === 'imported-model' || node.geometry.kind === 'serialized-object')}
+              onClick={storeScenePartsSeparately}
+            >
+              <Save size={16} />
+              <span>Store Scene Parts</span>
+            </button>
+            <button
+              title="Save scene imported parts as composite assembly"
+              disabled={document.nodes.filter((node) => node.geometry.kind === 'imported-model' || node.geometry.kind === 'serialized-object').length < 2}
+              onClick={storeSceneAssembly}
+            >
+              <Copy size={16} />
+              <span>Store Assembly</span>
+            </button>
+            <button title="Export warehouse project" disabled={!(document.partWarehouse?.length)} onClick={exportWarehouseProject}>
+              <Download size={16} />
+              <span>Export Warehouse</span>
+            </button>
+            <button title="Import warehouse project" onClick={() => warehouseInputRef.current?.click()}>
+              <FolderOpen size={16} />
+              <span>Import Warehouse</span>
+            </button>
+            <input ref={warehouseInputRef} type="file" accept=".json,.warehouse.json" hidden onChange={importWarehouseProject} />
+          </div>
+        </div>
+
+        <div className="warehouse-dashboard-body">
+          {warehouseGroups.length ? (
+            warehouseGroups.map((group) => (
+              <div key={group.category} className="warehouse-rack">
+                <div className="warehouse-rack-title">
+                  <strong>{group.category}</strong>
+                  <span>{group.classes.reduce((total, partClass) => total + partClass.items.length, 0)} items</span>
+                </div>
+                <div className="warehouse-rack-classes">
+                  {group.classes.map((partClass) => (
+                    <div key={`${group.category}-${partClass.className}`} className="warehouse-class-column">
+                      <div className="warehouse-class-label">
+                        <span>{partClass.className}</span>
+                        <small>{partClass.items.length}</small>
+                      </div>
+                      <div className="warehouse-bin-grid dashboard">
+                        {partClass.items.map((item) => (
+                          <button
+                            key={item.id}
+                            className={item.id === document.selectedWarehouseItemId ? 'warehouse-bin selected' : 'warehouse-bin'}
+                            title={`${item.code} - ${item.name}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              selectWarehouseItem(item.id);
+                            }}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              selectWarehouseItem(item.id);
+                              setWarehouseMenu({ itemId: item.id, x: event.clientX, y: event.clientY });
+                            }}
+                            onDoubleClick={() => addWarehouseItemToScene(item)}
+                          >
+                            {item.thumbnailDataUrl ? (
+                              <img src={item.thumbnailDataUrl} alt="" />
+                            ) : (
+                              <Cuboid size={28} />
+                            )}
+                            <small>{item.code}</small>
+                            <span>{item.name}</span>
+                            <em>{item.itemType === 'assembly' ? `${item.assemblyNodes.length} parts` : item.metadata.sourceFormat.toUpperCase()}</em>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="warehouse-empty-dashboard">No stored parts yet.</div>
+          )}
+        </div>
+      </section>
+      )}
+
+      {warehouseMenu && (
+        <div className="warehouse-context-menu" style={{ left: warehouseMenu.x, top: warehouseMenu.y }} onClick={(event) => event.stopPropagation()}>
+          {(() => {
+            const item = document.partWarehouse?.find((entry) => entry.id === warehouseMenu.itemId);
+            if (!item) return null;
+            return (
+              <>
+                <button onClick={() => addWarehouseItemToScene(item)}>
+                  <Import size={15} />
+                  <span>Send to scene</span>
+                </button>
+                <button onClick={() => saveWarehouseItemsPermanent([item], 'selected item')}>
+                  <Save size={15} />
+                  <span>Save permanently</span>
+                </button>
+                <button onClick={() => deleteWarehouseItem(item.id)}>
+                  <Trash2 size={15} />
+                  <span>Delete from warehouse</span>
+                </button>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {workspaceMenu && activeView === 'workspace' && (
+        <div className="warehouse-context-menu" style={{ left: workspaceMenu.x, top: workspaceMenu.y }} onClick={(event) => event.stopPropagation()}>
+          <button onClick={() => saveWorkspaceItemPermanent(workspaceMenu.nodeId)}>
+            <Save size={15} />
+            <span>Save object to project</span>
+          </button>
+          <button onClick={saveWorkspaceAssemblyPermanent}>
+            <Copy size={15} />
+            <span>Save scene set</span>
+          </button>
+          <button onClick={() => deleteWorkspaceObjectPermanent(workspaceMenu.nodeId)}>
+            <Trash2 size={15} />
+            <span>Delete permanently</span>
+          </button>
+        </div>
+      )}
 
       <footer className="statusbar">
         <span>{status}</span>
@@ -1229,10 +2852,66 @@ const Slider = ({ label, value, min, max, step, onChange }: SliderProps) => (
   </label>
 );
 
+const formatVector = (values: number[] | undefined, digits = 3) => (values?.map((value) => Number(value).toFixed(digits)).join(', ') ?? 'n/a');
+
+const KinematicGraphPanel = ({ geometry }: { geometry: ImportedModelGeometry }) => {
+  const graph = graphFromImportedGeometry(geometry);
+  const partById = new Map(graph.parts.map((part) => [part.id, part]));
+  const validatedCount = graph.joints.filter((joint) => joint.status === 'validated').length;
+  const movableParts = graph.parts.filter((part) => !part.static).length;
+
+  return (
+    <div className="kinematic-graph-panel">
+      <div className="section-title-row">
+        <h4>Kinematic Graph</h4>
+        <span>{graph.joints.length} joints</span>
+      </div>
+      <div className="graph-readiness">
+        <span>Parts {graph.parts.length}</span>
+        <span>Movable {movableParts}</span>
+        <span>Validated {validatedCount}</span>
+      </div>
+      {graph.joints.length ? (
+        <div className="kinematic-joint-list">
+          {graph.joints.map((joint) => (
+            <div key={joint.id} className="kinematic-joint-row">
+              <div className="joint-title-line">
+                <strong title={joint.name}>{joint.name}</strong>
+                <span>{joint.status}</span>
+              </div>
+              <dl>
+                <dt>Parent</dt>
+                <dd>{partById.get(joint.parentPartId)?.name ?? joint.parentPartId}</dd>
+                <dt>Child</dt>
+                <dd>{partById.get(joint.childPartId)?.name ?? joint.childPartId}</dd>
+                <dt>Type</dt>
+                <dd>{joint.type}</dd>
+                <dt>Axis</dt>
+                <dd>[{formatVector(joint.axis)}]</dd>
+                <dt>Pivot</dt>
+                <dd>[{formatVector(joint.origin.position)}]</dd>
+                <dt>Limits</dt>
+                <dd>
+                  {joint.limits?.lower?.toFixed(2) ?? 'n/a'} / {joint.limits?.upper?.toFixed(2) ?? 'n/a'}
+                </dd>
+                <dt>Evidence</dt>
+                <dd>{joint.evidence.map((item) => item.type).join(', ') || 'none'}</dd>
+              </dl>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">No kinematic joints yet. Use manual authoring in the next milestone.</div>
+      )}
+    </div>
+  );
+};
+
 type GeometryInspectorProps = {
   node: SceneNode;
   setGeometryValue: (field: string, value: number) => void;
   setImportedJointMotion: (jointName: string, value: number) => void;
+  resetImportedJointPose: () => void;
   normalizeImportedModel: () => void;
   demoActive: boolean;
   toggleImportedMotionDemo: () => void;
@@ -1251,6 +2930,7 @@ const GeometryInspector = ({
   node,
   setGeometryValue,
   setImportedJointMotion,
+  resetImportedJointPose,
   normalizeImportedModel,
   demoActive,
   toggleImportedMotionDemo,
@@ -1316,6 +2996,9 @@ const GeometryInspector = ({
         <div className="section-title-row">
           <h3>Imported Model</h3>
           <div className="mini-actions">
+            <button title="Factory reset" onClick={resetImportedJointPose}>
+              <RotateCw size={16} />
+            </button>
             <button title="Fit model to scene" onClick={normalizeImportedModel}>
               <Focus size={16} />
             </button>
@@ -1332,6 +3015,7 @@ const GeometryInspector = ({
           <span>Scene {(geometry.normalizedBounds ?? [0, 0, 0]).map((value) => value.toFixed(2)).join(' x ')}</span>
           <span>Scale {(geometry.importScale ?? 1).toFixed(4)}</span>
         </div>
+        <KinematicGraphPanel geometry={geometry} />
         <button className={demoActive ? 'smart-motion-button active' : 'smart-motion-button'} disabled={!geometry.joints.length} onClick={toggleImportedMotionDemo}>
           {demoActive ? <Pause size={16} /> : <Activity size={16} />}
           <span>{demoActive ? 'Stop Smart Demo' : validatedMotions.length ? 'Start Learned Demo' : 'Start Smart Demo'}</span>
@@ -1414,6 +3098,20 @@ const GeometryInspector = ({
         ) : (
           <div className="empty-state">This model has no skeleton. You can transform the whole object, but not pose articulations.</div>
         )}
+      </section>
+    );
+  }
+
+  if (geometry.kind === 'serialized-object') {
+    return (
+      <section>
+        <h3>Stored Part</h3>
+        <div className="metrics-list">
+          <span>{geometry.assetName}</span>
+          <span>
+            Bounds {geometry.normalizedBounds.map((value) => value.toFixed(2)).join(' x ')}
+          </span>
+        </div>
       </section>
     );
   }

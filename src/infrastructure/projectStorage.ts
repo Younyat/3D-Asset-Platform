@@ -3,6 +3,12 @@ import { AssetDocument } from '../domain/model';
 const STORAGE_KEY = '3d-asset-forge.current-project';
 const AUTOSAVE_KEY = '3d-asset-forge.autosave-project';
 
+const documentForBrowserStorage = (document: AssetDocument): AssetDocument => ({
+  ...document,
+  partWarehouse: [],
+  selectedWarehouseItemId: undefined,
+});
+
 export const saveProjectToBrowser = (document: AssetDocument) => {
   const updatedDocument = {
     ...document,
@@ -13,9 +19,9 @@ export const saveProjectToBrowser = (document: AssetDocument) => {
   };
 
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedDocument, null, 2));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(documentForBrowserStorage(updatedDocument), null, 2));
   } catch (error) {
-    console.warn('Project is too large for browser localStorage; JSON/native save is still available.', error);
+    console.warn('Project is too large for browser localStorage; physical warehouse files remain available.', error);
   }
   return updatedDocument;
 };
@@ -37,13 +43,13 @@ export const saveProjectAutosave = (assetDocument: AssetDocument) => {
     localStorage.setItem(
       AUTOSAVE_KEY,
       JSON.stringify(
-        {
+        documentForBrowserStorage({
           ...assetDocument,
           metadata: {
             ...assetDocument.metadata,
             updatedAt: new Date().toISOString(),
           },
-        },
+        }),
         null,
         2,
       ),
@@ -66,7 +72,7 @@ export const loadProjectAutosave = (): AssetDocument | null => {
 };
 
 export const downloadProjectFile = (assetDocument: AssetDocument) => {
-  const blob = new Blob([JSON.stringify(assetDocument, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify(documentForBrowserStorage(assetDocument), null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;

@@ -21,6 +21,7 @@ export const createEmptyProject = (name = 'Untitled Asset'): AssetDocument => {
       updatedAt: now,
     },
     nodes: [],
+    partWarehouse: [],
   };
 };
 

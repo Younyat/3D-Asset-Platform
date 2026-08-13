@@ -5,8 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "dev:fresh": "node scripts/dev-fresh.mjs",
     "dev:tauri": "vite --host 127.0.0.1 --port 5190 --strictPort",
     "build": "tsc && vite build",
+    "test:render": "node scripts/regression-render.mjs",
+    "test:articulation": "node scripts/regression-articulation.mjs",
+    "test:parts": "node scripts/regression-parts-selection.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",

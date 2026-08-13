@@ -106,6 +106,91 @@ const applyImportedJointPoses = (object: THREE.Object3D, node: SceneNode) => {
   });
 };
 
+const applyImportedFreePartTransforms = (object: THREE.Object3D, node: SceneNode) => {
+  if (node.geometry.kind !== 'imported-model' || !node.geometry.freePartTransforms?.length) return;
+  const transformByName = new Map(node.geometry.freePartTransforms.map((partTransform) => [partTransform.objectName, partTransform]));
+
+  object.traverse((child) => {
+    const partTransform = transformByName.get(child.name);
+    if (!partTransform) return;
+
+    child.position.fromArray(partTransform.position);
+    child.rotation.set(...partTransform.rotation);
+    child.scale.fromArray(partTransform.scale);
+    child.updateMatrixWorld(true);
+  });
+};
+
+const objectHasRenderableGeometry = (object: THREE.Object3D) => {
+  let hasGeometry = false;
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.isMesh && mesh.geometry?.attributes?.position?.count) hasGeometry = true;
+  });
+  return hasGeometry;
+};
+
+const normalizedObjectName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+const visibleIsolationFallback = (objects: THREE.Object3D[], targetName: string) => {
+  const target = normalizedObjectName(targetName);
+  const targetTokens = target.split(/\s+/).filter((token) => token.length > 2);
+  const visibleObjects = objects.filter((candidate) => candidate.name && objectHasRenderableGeometry(candidate));
+
+  return (
+    visibleObjects.find((candidate) => {
+      const candidateName = normalizedObjectName(candidate.name);
+      if (!candidateName) return false;
+      if (candidateName.includes(target) || target.includes(candidateName)) return true;
+      return targetTokens.some((token) => candidateName.includes(token));
+    }) ?? visibleObjects.find((candidate) => (candidate as THREE.Mesh).isMesh) ?? visibleObjects[0]
+  );
+};
+
+const cloneObjectInWorld = (object: THREE.Object3D) => {
+  const clone = cloneSkeleton(object);
+  const worldPosition = new THREE.Vector3();
+  const worldQuaternion = new THREE.Quaternion();
+  const worldScale = new THREE.Vector3();
+  object.matrixWorld.decompose(worldPosition, worldQuaternion, worldScale);
+  clone.position.copy(worldPosition);
+  clone.quaternion.copy(worldQuaternion);
+  clone.scale.copy(worldScale);
+  return clone;
+};
+
+const isolateImportedObjects = (object: THREE.Object3D, node: SceneNode) => {
+  if (node.geometry.kind !== 'imported-model' || !node.geometry.isolatedObjectNames?.length) return object;
+  const isolatedNames = new Set(node.geometry.isolatedObjectNames);
+  const isolatedRoot = new THREE.Group();
+  isolatedRoot.name = object.name;
+  object.updateMatrixWorld(true);
+  const objects: THREE.Object3D[] = [];
+
+  object.traverse((child) => {
+    objects.push(child);
+    if (!isolatedNames.has(child.name) || !objectHasRenderableGeometry(child)) return;
+    const mesh = child as THREE.Mesh;
+    if (mesh.isMesh && mesh.geometry?.attributes?.position?.count) {
+      isolatedRoot.add(cloneObjectInWorld(child));
+      return;
+    }
+    const descendants: THREE.Object3D[] = [];
+    child.traverse((descendant) => descendants.push(descendant));
+    const fallback = visibleIsolationFallback(descendants, child.name);
+    if (fallback && fallback !== child) isolatedRoot.add(cloneObjectInWorld(fallback));
+  });
+
+  if (!isolatedRoot.children.length) {
+    node.geometry.isolatedObjectNames.forEach((name) => {
+      const fallback = visibleIsolationFallback(objects, name);
+      if (fallback) isolatedRoot.add(cloneObjectInWorld(fallback));
+    });
+  }
+
+  return objectHasRenderableGeometry(isolatedRoot) ? isolatedRoot : object;
+};
+
 const hasGeometryVertices = (object: THREE.Object3D) => {
   const mesh = object as THREE.Mesh;
   return Boolean(mesh.geometry?.attributes?.position?.count);
@@ -154,6 +239,64 @@ const makeMaterial = (node: SceneNode, overrides: Partial<THREE.MeshStandardMate
     emissiveIntensity: node.material.emissiveIntensity ?? 0,
     ...overrides,
   });
+
+const makeImportedSurfaceMaterial = (node: SceneNode, source?: THREE.Material) => {
+  const sourceWithMaps = source as
+    | (THREE.Material & {
+        normalMap?: THREE.Texture | null;
+        roughnessMap?: THREE.Texture | null;
+        metalnessMap?: THREE.Texture | null;
+        aoMap?: THREE.Texture | null;
+      })
+    | undefined;
+
+  const material = makeMaterial(node, {
+    name: source?.name,
+    side: source?.side ?? THREE.FrontSide,
+    transparent: source?.transparent ?? false,
+    opacity: source?.opacity ?? 1,
+    alphaTest: source?.alphaTest ?? 0,
+    normalMap: sourceWithMaps?.normalMap ?? null,
+    roughnessMap: sourceWithMaps?.roughnessMap ?? null,
+    metalnessMap: sourceWithMaps?.metalnessMap ?? null,
+    aoMap: sourceWithMaps?.aoMap ?? null,
+  });
+  material.needsUpdate = true;
+  return material;
+};
+
+const applyNodeMaterialToImportedMeshes = (object: THREE.Object3D, node: SceneNode) => {
+  const partMaterialByName =
+    node.geometry.kind === 'imported-model' ? new Map((node.geometry.partMaterials ?? []).map((partMaterial) => [partMaterial.objectName, partMaterial])) : new Map();
+
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    let current: THREE.Object3D | null = mesh;
+    let partMaterial: { color: string; roughness?: number; metalness?: number } | undefined;
+    while (current && !partMaterial) {
+      partMaterial = partMaterialByName.get(current.name);
+      current = current.parent;
+    }
+    const materialNode = partMaterial
+      ? {
+          ...node,
+          material: {
+            ...node.material,
+            color: partMaterial.color,
+            roughness: partMaterial.roughness ?? node.material.roughness,
+            metalness: partMaterial.metalness ?? node.material.metalness,
+          },
+        }
+      : node;
+
+    if (Array.isArray(mesh.material)) {
+      mesh.material = mesh.material.map((material) => makeImportedSurfaceMaterial(materialNode, material));
+    } else {
+      mesh.material = makeImportedSurfaceMaterial(materialNode, mesh.material);
+    }
+  });
+};
 
 const createPrimitiveObject = (node: SceneNode) => {
   const material = makeMaterial(node);
@@ -661,8 +804,72 @@ const createGeneratedObject = (node: SceneNode) => {
   return null;
 };
 
+type CompactSerializedMesh = {
+  name: string;
+  position: string;
+  normal?: string;
+  uv?: string;
+  index?: string;
+};
+
+type CompactSerializedObject = {
+  assetForgeSerializedObject: number;
+  meshes: CompactSerializedMesh[];
+};
+
+const isCompactSerializedObject = (value: unknown): value is CompactSerializedObject =>
+  Boolean(value && typeof value === 'object' && 'assetForgeSerializedObject' in value && Array.isArray((value as CompactSerializedObject).meshes));
+
+const createSerializedObject = (node: SceneNode) => {
+  if (node.geometry.kind !== 'serialized-object') return null;
+  const serialized = node.geometry.objectJson;
+  const decodeBuffer = (encoded: string) => {
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes.buffer;
+  };
+
+  const object =
+    isCompactSerializedObject(serialized)
+      ? (() => {
+          const group = new THREE.Group();
+          group.name = node.name;
+          serialized.meshes.forEach((meshData) => {
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(decodeBuffer(meshData.position)), 3));
+            if (meshData.normal) geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(decodeBuffer(meshData.normal)), 3));
+            if (meshData.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(decodeBuffer(meshData.uv)), 2));
+            if (meshData.index) geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(decodeBuffer(meshData.index)), 1));
+            if (!geometry.attributes.normal) geometry.computeVertexNormals();
+            const mesh = new THREE.Mesh(geometry, makeMaterial(node));
+            mesh.name = meshData.name;
+            group.add(mesh);
+          });
+          return group;
+        })()
+      : new THREE.ObjectLoader().parse(serialized as Parameters<THREE.ObjectLoader['parse']>[0]);
+  applyNodeMaterialToImportedMeshes(object, node);
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(object);
+  if (!box.isEmpty()) {
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const maxDimension = Math.max(size.x, size.y, size.z);
+    if (maxDimension > 0.0001) {
+      const scale = 1.65 / maxDimension;
+      const minYAfterCenter = (box.min.y - center.y) * scale;
+      object.scale.multiplyScalar(scale);
+      object.position.set(-center.x * scale, -minYAfterCenter, -center.z * scale);
+    }
+  }
+  return object;
+};
+
 export const createSceneObject = (node: SceneNode) => {
-  const object = createGeneratedObject(node) ?? createPrimitiveObject(node);
+  const object = createSerializedObject(node) ?? createGeneratedObject(node) ?? createPrimitiveObject(node);
   if (!object) {
     throw new Error(`Unsupported geometry: ${node.geometry.kind}`);
   }
@@ -683,15 +890,32 @@ export const createRenderableScene = (nodes: SceneNode[]) => {
 export const createImportedSceneObject = async (node: SceneNode) => {
   if (node.geometry.kind !== 'imported-model') return null;
 
-  const root = await loadImportedDataUrl(node.geometry.assetDataUrl, node.geometry.sourceFormat);
+  let root = await loadImportedDataUrl(node.geometry.assetDataUrl, node.geometry.sourceFormat);
+  const isolated = Boolean(node.geometry.isolatedObjectNames?.length);
   const group = new THREE.Group();
   group.name = node.name;
   root.name = node.name;
   buildThreeDsMechanicalHierarchy(root, node);
   captureImportedRestTransforms(root);
   applyImportedJointPoses(root, node);
-  root.scale.multiplyScalar(node.geometry.importScale ?? 1);
-  root.position.fromArray(node.geometry.importOffset ?? [0, 0, 0]);
+  applyImportedFreePartTransforms(root, node);
+  root = isolateImportedObjects(root, node);
+  applyNodeMaterialToImportedMeshes(root, node);
+  if (isolated) {
+    root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(root);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const scale = 1.65 / Math.max(size.x, size.y, size.z, 0.0001);
+    const minYAfterCenter = (box.min.y - center.y) * scale;
+    root.scale.multiplyScalar(scale);
+    root.position.set(-center.x * scale, -minYAfterCenter, -center.z * scale);
+  } else {
+    root.scale.multiplyScalar(node.geometry.importScale ?? 1);
+    root.position.fromArray(node.geometry.importOffset ?? [0, 0, 0]);
+  }
   root.updateMatrixWorld(true);
   group.add(root);
   applyNodeTransform(group, node);

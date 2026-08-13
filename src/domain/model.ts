@@ -1,3 +1,5 @@
+import type { KinematicGraph } from './kinematics';
+
 export type NodeId = string;
 
 export type Transform = {
@@ -9,6 +11,7 @@ export type Transform = {
 export type Vector3Tuple = [number, number, number];
 export type MotionAxis = 'x' | 'y' | 'z';
 export type JointMotionKind = 'rotation' | 'translation';
+export type CursorMotionControl = 'horizontal-rotation' | 'vertical-rotation' | 'dial-rotation' | 'linear-axis';
 
 export type MaterialDefinition = {
   name: string;
@@ -50,6 +53,7 @@ export type ImportedJointPose = {
   sourceType?: 'bone' | 'object';
   motionKind?: JointMotionKind;
   axis?: MotionAxis;
+  cursorControl?: CursorMotionControl;
   min?: number;
   max?: number;
   demoAmplitude?: number;
@@ -69,6 +73,20 @@ export type ValidatedJointMotion = {
   order: number;
 };
 
+export type ImportedPartTransform = {
+  objectName: string;
+  position: Vector3Tuple;
+  rotation: Vector3Tuple;
+  scale: Vector3Tuple;
+};
+
+export type ImportedPartMaterial = {
+  objectName: string;
+  color: string;
+  roughness?: number;
+  metalness?: number;
+};
+
 export type ImportedModelGeometry = {
   kind: 'imported-model';
   assetName: string;
@@ -82,9 +100,22 @@ export type ImportedModelGeometry = {
   animations: string[];
   joints: ImportedJointPose[];
   validatedMotions?: ValidatedJointMotion[];
+  freePartTransforms?: ImportedPartTransform[];
+  partMaterials?: ImportedPartMaterial[];
+  isolatedObjectNames?: string[];
+  partObjectNames?: string[];
+  kinematicGraph?: KinematicGraph;
 };
 
-export type GeometryDefinition = PrimitiveGeometry | GeneratedGeometry | ImportedModelGeometry;
+export type SerializedObjectGeometry = {
+  kind: 'serialized-object';
+  assetName: string;
+  objectJson: unknown;
+  originalBounds: Vector3Tuple;
+  normalizedBounds: Vector3Tuple;
+};
+
+export type GeometryDefinition = PrimitiveGeometry | GeneratedGeometry | ImportedModelGeometry | SerializedObjectGeometry;
 
 export type SceneNode = {
   id: NodeId;
@@ -105,11 +136,61 @@ export type ProjectMetadata = {
   updatedAt: string;
 };
 
+export type PartWarehousePartItem = {
+  id: string;
+  itemType: 'part';
+  code: string;
+  name: string;
+  category: string;
+  className: string;
+  thumbnailDataUrl?: string;
+  sourceNodeId: NodeId;
+  sourceAssetName: string;
+  objectName: string;
+  geometry: ImportedModelGeometry | SerializedObjectGeometry;
+  material: MaterialDefinition;
+  metadata: {
+    sourceFormat: ImportedModelGeometry['sourceFormat'] | 'serialized-object';
+    originalBounds: Vector3Tuple;
+    storedAt: string;
+    updatedAt: string;
+    storageKey?: string;
+    storageProjectId?: string;
+    storageFileName?: string;
+  };
+};
+
+export type PartWarehouseAssemblyItem = {
+  id: string;
+  itemType: 'assembly';
+  code: string;
+  name: string;
+  category: 'Assemblies';
+  className: string;
+  thumbnailDataUrl?: string;
+  sourceNodeId?: NodeId;
+  sourceAssetName: string;
+  assemblyNodes: SceneNode[];
+  metadata: {
+    sourceFormat: 'assembly';
+    originalBounds: Vector3Tuple;
+    storedAt: string;
+    updatedAt: string;
+    storageKey?: string;
+    storageProjectId?: string;
+    storageFileName?: string;
+  };
+};
+
+export type PartWarehouseItem = PartWarehousePartItem | PartWarehouseAssemblyItem;
+
 export type AssetDocument = {
   schemaVersion: 1;
   metadata: ProjectMetadata;
   nodes: SceneNode[];
   selectedNodeId?: NodeId;
+  partWarehouse?: PartWarehouseItem[];
+  selectedWarehouseItemId?: string;
 };
 
 export type ValidationIssue = {
@@ -119,7 +200,8 @@ export type ValidationIssue = {
   nodeId?: NodeId;
 };
 
-export type EditorTool = 'select' | 'translate' | 'rotate' | 'scale';
+export type EditorTool = 'select' | 'translate' | 'rotate' | 'scale' | 'parts';
+export type PartEditMode = 'free' | 'translate' | 'rotate' | 'scale';
 
 export const defaultTransform = (): Transform => ({
   position: [0, 0.5, 0],

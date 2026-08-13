@@ -52,6 +52,10 @@ La demo aprendida aplica movimiento sobre la escena Three.js ya cargada, evitand
 
 ## Como Funciona
 
+Manual operativo separado:
+
+- [Manual de uso: warehouse, piezas y workspace](docs/manual-uso-warehouse.md)
+
 ### 1. Crear O Importar
 
 El usuario puede crear objetos procedurales desde el panel de generadores o importar un modelo existente. El modelo importado queda embebido dentro del documento del proyecto como data URL, por lo que puede guardarse y restaurarse sin depender de rutas externas.
@@ -133,11 +137,33 @@ Instalar dependencias:
 npm install
 ```
 
+En Windows PowerShell, si `npm` queda bloqueado por `npm.ps1`, usar:
+
+```powershell
+npm.cmd install
+```
+
 Arrancar el servidor de desarrollo:
 
 ```bash
 npm run dev -- --port 5187 --strictPort
 ```
+
+En Windows PowerShell:
+
+```powershell
+npm.cmd run dev -- --port 5187 --strictPort
+```
+
+Copiar solo el comando, no el prefijo del terminal. Por ejemplo, no copiar `PS C:\...\3D Asset Platform>`.
+
+Si el puerto esta ocupado por una instancia anterior de la misma plataforma, usar:
+
+```powershell
+npm.cmd run dev:fresh -- --port 5187
+```
+
+Este comando cierra el servidor Vite anterior del proyecto y lo vuelve a abrir en el mismo puerto.
 
 Abrir en el navegador:
 
@@ -149,6 +175,12 @@ Construir version de produccion:
 
 ```bash
 npm run build
+```
+
+En Windows PowerShell:
+
+```powershell
+npm.cmd run build
 ```
 
 Previsualizar la build:
