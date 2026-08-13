@@ -21,6 +21,10 @@ El objetivo principal es reducir el trabajo manual necesario para preparar model
 - Controles logicos por articulacion: `Rotate X/Y/Z` o `Slide X/Y/Z`.
 - Motion Trainer para validar movimientos test por test.
 - Demo aprendida basada solo en movimientos validados y ordenados por el usuario.
+- Warehouse de piezas con dashboard separado, categorias, clases y miniaturas reales.
+- Guardado fisico de piezas y conjuntos como `.glb` dentro de `project-warehouse/<projectId>/`.
+- Guardado permanente de cambios del workspace: color, transformaciones, copias y objetos importados.
+- Borrado permanente desde workspace o warehouse, eliminando tambien el fichero local asociado.
 - Preflight de exportacion y perfiles GLB para uso generico, Unity, Unreal y Godot.
 - Modo navegador y base Tauri para aplicacion de escritorio.
 
@@ -104,6 +108,26 @@ Motion Trainer genera candidatos para cada articulacion detectada. El flujo es:
 
 Los datos aprendidos se guardan en el documento como `validatedMotions`, incluyendo articulacion, tipo de movimiento, eje, limites, amplitud y orden.
 
+### 6. Guardar Piezas En Warehouse
+
+El warehouse permite convertir piezas desmontadas o conjuntos creados en el escenario en objetos 3D independientes. Las piezas permanentes se guardan como `.glb` fisicos en el proyecto local y se indexan en `manifest.json`.
+
+Flujo principal:
+
+1. Importar un modelo con `3D Model`.
+2. Pulsar `Dismantle selected model into warehouse`.
+3. Abrir `Warehouse dashboard`.
+4. Pulsar `Save All`.
+5. Refrescar la pagina.
+6. Pulsar `Load Saved`.
+7. Importar una pieza con `Import saved warehouse object to workspace`.
+
+Si se modifica una pieza en el workspace, el boton `Save workspace changes permanently` se activa y guarda fisicamente esos cambios. Las miniaturas del warehouse se guardan tambien en el manifest para que despues del refresh no aparezca el icono generico.
+
+Los detalles completos estan en:
+
+- [Manual de uso: warehouse, piezas y workspace](docs/manual-uso-warehouse.md)
+
 ## Estrategia De Rendimiento
 
 La plataforma esta optimizada para evitar recargas innecesarias:
@@ -127,6 +151,7 @@ src/
   presentation/         UI React, inspector, viewport y controles del editor
 src-tauri/              Base para aplicacion de escritorio
 docs/readme-assets/     Capturas y animaciones usadas por este README
+project-warehouse/      Almacen local de piezas GLB permanentes en desarrollo
 ```
 
 ## Lanzar El Proyecto
@@ -219,10 +244,12 @@ Assets actuales:
 
 ## Estado De Validacion
 
-La build actual pasa correctamente:
+Comandos principales de validacion:
 
 ```bash
 npm run build
+npm run test:render
+npm run test:parts
 ```
 
 El aviso de bundle grande es esperado porque la aplicacion incluye Three.js y varios loaders 3D. No bloquea la build de produccion.
