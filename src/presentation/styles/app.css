@@ -657,6 +657,191 @@ input[type="color"] {
   background: #1b1f23;
 }
 
+.mechanical-guide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: start;
+  border: 1px solid #355260;
+  border-radius: 6px;
+  padding: 7px;
+  background: #17262d;
+}
+
+.mechanical-guide strong {
+  color: #edf1f3;
+  font-size: 12px;
+}
+
+.mechanical-guide p {
+  grid-column: 1;
+  margin: 0;
+  color: #aebac0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.mechanical-guide button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-height: 26px;
+}
+
+.mechanical-mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.mechanical-mode-toggle button.active {
+  border-color: #55d6ca;
+  background: #163432;
+  color: #d7fffb;
+}
+
+.mechanical-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.mechanical-steps span {
+  border: 1px solid #323a42;
+  border-radius: 5px;
+  padding: 5px;
+  color: #b8c3c9;
+  background: #20262b;
+  font-size: 10px;
+  text-align: center;
+}
+
+.mechanical-steps .step-completed {
+  border-color: #2e5853;
+  color: #8fe9df;
+}
+
+.mechanical-steps .step-in-progress {
+  border-color: #4e6f9f;
+  color: #b9d4ff;
+}
+
+.mechanical-steps .step-warning,
+.mechanical-steps .step-error {
+  border-color: #77543f;
+  color: #ffc49c;
+}
+
+.mechanical-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.mechanical-summary span,
+.mechanical-status-line,
+.joint-readable-links span,
+.mechanical-test-results span {
+  border: 1px solid #323a42;
+  border-radius: 5px;
+  padding: 5px;
+  color: #dfe7eb;
+  background: #22272c;
+  font-size: 11px;
+}
+
+.mechanical-status-line {
+  color: #bfc9ce;
+  line-height: 1.35;
+}
+
+.context-help {
+  border: 1px solid #323a42;
+  border-radius: 5px;
+  padding: 6px;
+  background: #20252a;
+}
+
+.context-help summary {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+  color: #dfe7eb;
+  font-size: 11px;
+}
+
+.context-help p {
+  margin: 7px 0 0;
+  color: #aab6bc;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.mechanical-test-results,
+.guided-repair,
+.gripper-control {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #323a42;
+  border-radius: 6px;
+  padding: 7px;
+  background: #1e2429;
+}
+
+.mechanical-test-results strong,
+.gripper-control strong {
+  color: #edf1f3;
+  font-size: 12px;
+}
+
+.mechanical-test-results .result-pass {
+  border-color: #2e5853;
+  color: #8fe9df;
+}
+
+.mechanical-test-results .result-testing {
+  border-color: #4e6f9f;
+  color: #b9d4ff;
+}
+
+.guided-repair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.guided-repair button {
+  min-height: 28px;
+  font-size: 11px;
+}
+
+.joint-readable-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.joint-visual-tools.primary {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.advanced-kinematic-fields {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #323a42;
+  border-radius: 5px;
+  padding: 6px;
+  background: #1c2227;
+}
+
+.advanced-kinematic-fields summary {
+  cursor: pointer;
+  color: #9aa7ad;
+  font-size: 11px;
+}
+
+.mechanical-panel.simple .advanced-kinematic-fields:not([open]) {
+  padding-bottom: 6px;
+}
+
 .kinematic-graph-panel .section-title-row {
   margin-bottom: 0;
 }
@@ -783,6 +968,15 @@ input[type="color"] {
   align-items: center;
 }
 
+.joint-title-line button {
+  min-width: 0;
+  justify-content: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
 .joint-title-line strong {
   min-width: 0;
   overflow: hidden;
@@ -795,6 +989,11 @@ input[type="color"] {
   color: #55d6ca;
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.kinematic-joint-row.selected {
+  border-color: #55d6ca;
+  box-shadow: 0 0 0 1px rgba(85, 214, 202, 0.18);
 }
 
 .kinematic-joint-row dl {

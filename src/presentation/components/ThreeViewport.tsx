@@ -60,7 +60,7 @@ export type MotionTrainingPreview = {
   amplitude: number;
 };
 
-export type KinematicEditMode = 'pick-origin' | 'pick-axis-a' | 'pick-axis-b' | 'axis-gizmo';
+export type KinematicEditMode = 'show-joint' | 'pick-origin' | 'pick-axis-a' | 'pick-axis-b' | 'axis-gizmo';
 
 export type KinematicEditTarget = {
   nodeId: string;
@@ -69,6 +69,10 @@ export type KinematicEditTarget = {
   origin: [number, number, number];
   axis: [number, number, number];
   axisPointA?: [number, number, number];
+  parentObjectNames?: string[];
+  childObjectNames?: string[];
+  affectedObjectNames?: string[];
+  focusKey?: string;
 };
 
 export type KinematicPointPickEvent = {
@@ -655,6 +659,10 @@ export const ThreeViewport = ({
           arrow.cone.geometry.dispose();
           disposeHelperMaterial(arrow.line.material);
           disposeHelperMaterial(arrow.cone.material);
+        } else if (child instanceof THREE.BoxHelper) {
+          const box = child as THREE.BoxHelper;
+          box.geometry.dispose();
+          disposeHelperMaterial(box.material);
         } else {
           const mesh = child as THREE.Mesh;
           mesh.geometry?.dispose();
@@ -683,12 +691,33 @@ export const ThreeViewport = ({
       return arrow;
     };
 
+    const findObjectsByNames = (nodeId: string, objectNames: string[] | undefined) => {
+      if (!objectNames?.length) return [];
+      const names = new Set(objectNames);
+      const objects: THREE.Object3D[] = [];
+      assetRoot.traverse((object) => {
+        if (object.userData.nodeId === nodeId && names.has(object.name)) objects.push(object);
+      });
+      return objects;
+    };
+
+    const addObjectHighlights = (nodeId: string, objectNames: string[] | undefined, color: string) => {
+      findObjectsByNames(nodeId, objectNames).forEach((object) => {
+        const box = new THREE.BoxHelper(object, color);
+        box.renderOrder = 17;
+        kinematicHelperGroup.add(box);
+      });
+    };
+
     const syncKinematicHelpers = () => {
       clearKinematicHelpers();
       const target = kinematicEditTargetRef.current;
       if (!target) return;
       const origin = new THREE.Vector3(...target.origin);
       const axis = new THREE.Vector3(...normalizeTuple(target.axis));
+      addObjectHighlights(target.nodeId, target.affectedObjectNames, '#7dd3fc');
+      addObjectHighlights(target.nodeId, target.parentObjectNames, '#4ea1ff');
+      addObjectHighlights(target.nodeId, target.childObjectNames, '#ffd23f');
       addMarker(origin, '#ff4d6d', 0.07);
       addArrow(origin, new THREE.Vector3(1, 0, 0), '#ef4444', 0.42);
       addArrow(origin, new THREE.Vector3(0, 1, 0), '#22c55e', 0.42);
@@ -698,6 +727,14 @@ export const ThreeViewport = ({
       if (target.mode === 'axis-gizmo') {
         kinematicAxisHandle.position.copy(origin.clone().add(axis.multiplyScalar(0.95)));
         kinematicAxisHandle.visible = true;
+      }
+      if (target.focusKey && target.focusKey !== renderer.domElement.dataset.kinematicFocusKey) {
+        renderer.domElement.dataset.kinematicFocusKey = target.focusKey;
+        const distance = 3.8;
+        orbit.target.copy(origin);
+        camera.position.copy(origin.clone().add(new THREE.Vector3(distance, distance * 0.65, distance)));
+        camera.lookAt(origin);
+        orbit.update();
       }
     };
 
@@ -1255,7 +1292,72 @@ export const ThreeViewport = ({
       cpuPercent: 0,
     };
 
+    const runtimeWindow = window as Window & {
+      __assetForgeViewportPickPoints?: () => Array<{ x: number; y: number; name: string }>;
+      __assetForgeViewportPickActiveKinematicPoint?: () => boolean;
+    };
+    runtimeWindow.__assetForgeViewportPickPoints = () => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const points: Array<{ x: number; y: number; name: string }> = [];
+      assetRoot.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.geometry || !object.visible) return;
+        const world = new THREE.Vector3();
+        object.getWorldPosition(world);
+        const projected = world.project(camera);
+        if (projected.z < -1 || projected.z > 1) return;
+        const x = ((projected.x + 1) / 2) * rect.width;
+        const y = ((1 - projected.y) / 2) * rect.height;
+        if (x >= 0 && x <= rect.width && y >= 0 && y <= rect.height) {
+          points.push({ x, y, name: object.name });
+        }
+      });
+      return points;
+    };
+    runtimeWindow.__assetForgeViewportPickActiveKinematicPoint = () => {
+      const target = kinematicEditTargetRef.current;
+      if (!target || (target.mode !== 'pick-origin' && target.mode !== 'pick-axis-a' && target.mode !== 'pick-axis-b')) return false;
+      let picked: THREE.Object3D | undefined;
+      assetRoot.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (picked || !mesh.geometry || !object.visible) return;
+        if (target.mode === 'pick-axis-b' && target.axisPointA) {
+          const world = new THREE.Vector3();
+          object.getWorldPosition(world);
+          const assetPoint = assetPointFromWorld(world);
+          const distance = assetPoint.distanceTo(new THREE.Vector3(...target.axisPointA));
+          if (distance < 0.05) return;
+        }
+        picked = object;
+      });
+      if (!picked && target.mode === 'pick-axis-b' && target.axisPointA) {
+        onSelectRef.current(target.nodeId);
+        onKinematicPointPickRef.current({
+          nodeId: target.nodeId,
+          jointId: target.jointId,
+          mode: target.mode,
+          point: [target.axisPointA[0] + 0.5, target.axisPointA[1], target.axisPointA[2]],
+          objectName: 'axis-fallback',
+        });
+        return true;
+      }
+      if (!picked) return false;
+      const world = new THREE.Vector3();
+      picked.getWorldPosition(world);
+      onSelectRef.current(target.nodeId);
+      onKinematicPointPickRef.current({
+        nodeId: target.nodeId,
+        jointId: target.jointId,
+        mode: target.mode,
+        point: vectorTuple(assetPointFromWorld(world)),
+        objectName: picked.name,
+      });
+      return true;
+    };
+
     return () => {
+      delete runtimeWindow.__assetForgeViewportPickPoints;
+      delete runtimeWindow.__assetForgeViewportPickActiveKinematicPoint;
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
       renderer.domElement.removeEventListener('contextmenu', onContextMenu);

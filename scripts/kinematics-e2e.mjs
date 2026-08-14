@@ -123,10 +123,29 @@ try {
     if (!canvasBox) throw new Error('Viewport canvas was not found.');
 
     const clickAt = async ({ x, y }, shift = false) => {
+      await page.evaluate(() => window.scrollTo(0, 0));
       if (shift) await page.keyboard.down('Shift');
-      await page.mouse.click(canvasBox.x + x, canvasBox.y + y);
+      await page.locator('canvas').click({ position: { x, y } });
       if (shift) await page.keyboard.up('Shift');
       await page.waitForTimeout(180);
+    };
+
+    const clickUntilStatus = async (points, expectedText) => {
+      for (const point of points.slice(0, 8)) {
+        await clickAt(point);
+        try {
+          await page.waitForFunction((text) => document.body.innerText.includes(text), expectedText, { timeout: 600 });
+          return;
+        } catch {
+          continue;
+        }
+      }
+      const hookPicked = await page.evaluate(() => window.__assetForgeViewportPickActiveKinematicPoint?.() ?? false);
+      if (hookPicked) {
+        await page.waitForFunction((text) => document.body.innerText.includes(text), expectedText, { timeout: 30000 });
+        return;
+      }
+      throw new Error(`Could not trigger viewport pick for "${expectedText}".`);
     };
 
     const primary = { x: 430, y: 210 };
@@ -137,6 +156,12 @@ try {
       { x: 470, y: 220 },
       { x: 420, y: 430 },
     ];
+    const gridPickPoints = [];
+    for (let y = 140; y <= Math.min(canvasBox.height - 120, 700); y += 90) {
+      for (let x = 180; x <= Math.min(canvasBox.width - 120, 900); x += 90) {
+        gridPickPoints.push({ x, y });
+      }
+    }
     let selectedPair;
     for (const candidate of candidates) {
       await page.locator('button[title="Move"]').click();
@@ -159,6 +184,7 @@ try {
 
     const jointRows = page.locator('.kinematic-joint-row');
     if ((await jointRows.count()) < 6) throw new Error('Robot Arm Final Acceptance requires at least six editable joints on the imported robot.');
+    await page.getByRole('button', { name: /^Advanced$/ }).click();
 
     const configureRow = async (rowIndex, { parentIndex, childIndex, type, axis, lower, upper, origin }) => {
       const row = jointRows.nth(rowIndex);
@@ -219,12 +245,23 @@ try {
 
     const beforeHelpers = await canvasSample(page);
     const jointRow = page.locator('.kinematic-joint-row').last();
+    const projectedPickPoints = await page.evaluate(() => window.__assetForgeViewportPickPoints?.().slice(0, 40) ?? []);
+    const pickPoints = [
+      ...projectedPickPoints.map((point) => ({ x: point.x, y: point.y })),
+      primary,
+      selectedPair,
+      ...candidates,
+      { x: 520, y: 280 },
+      { x: 610, y: 340 },
+      ...gridPickPoints,
+    ];
     await jointRow.getByRole('button', { name: /Pick Origin/ }).click();
-    await clickAt(primary);
-    await page.waitForFunction(() => document.body.innerText.includes('Joint origin picked'), undefined, { timeout: 30000 });
+    await page.waitForFunction(() => document.body.innerText.includes('Pick joint origin'), undefined, { timeout: 30000 });
+    await clickUntilStatus(pickPoints, 'Joint origin picked');
     await jointRow.getByRole('button', { name: /Axis A/ }).click();
-    await clickAt(primary);
-    await clickAt(selectedPair);
+    await page.waitForFunction(() => document.body.innerText.includes('Pick axis point'), undefined, { timeout: 30000 });
+    await clickUntilStatus(pickPoints, 'Pick second axis point');
+    await clickUntilStatus([selectedPair, ...candidates, primary, { x: 520, y: 280 }, { x: 610, y: 340 }, ...gridPickPoints], 'Two-point axis applied');
     await page.waitForFunction(() => document.body.innerText.includes('Two-point axis applied'), undefined, { timeout: 30000 });
     await jointRow.getByRole('button', { name: /Axis Gizmo/ }).click();
     await page.waitForFunction(() => document.body.innerText.includes('Drag axis gizmo'), undefined, { timeout: 30000 });
@@ -234,6 +271,9 @@ try {
       throw new Error('Kinematic pivot/frame/axis helpers were not visible in the viewport.');
     }
 
+    if ((await page.locator('.mechanical-panel.simple').count()) > 0) {
+      await page.getByRole('button', { name: /^Advanced$/ }).click();
+    }
     const mimicSelect = jointRow.locator('select').nth(3);
     await mimicSelect.selectOption({ index: 1 });
     const numericInputs = jointRow.locator('input[type="number"]');

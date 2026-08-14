@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Box,
   Activity,
+  AlertTriangle,
   Check,
   Circle,
   Copy,
@@ -16,6 +17,7 @@ import {
   FolderOpen,
   Grid3X3,
   Hammer,
+  HelpCircle,
   Import,
   Lock,
   Magnet,
@@ -508,12 +510,31 @@ export const App = () => {
     if (!kinematicEditTarget) return undefined;
     const node = document.nodes.find((item) => item.id === kinematicEditTarget.nodeId);
     if (!node || node.geometry.kind !== 'imported-model') return undefined;
-    const joint = graphFromImportedGeometry(node.geometry).joints.find((item) => item.id === kinematicEditTarget.jointId);
+    const graph = graphFromImportedGeometry(node.geometry);
+    const joint = graph.joints.find((item) => item.id === kinematicEditTarget.jointId);
     if (!joint) return undefined;
+    const partById = new Map(graph.parts.map((part) => [part.id, part]));
+    const childrenByParent = new Map<string, string[]>();
+    graph.joints.forEach((item) => {
+      childrenByParent.set(item.parentPartId, [...(childrenByParent.get(item.parentPartId) ?? []), item.childPartId]);
+    });
+    const affectedPartIds = new Set<string>([joint.childPartId]);
+    const queue = [...(childrenByParent.get(joint.childPartId) ?? [])];
+    while (queue.length) {
+      const partId = queue.shift();
+      if (!partId || affectedPartIds.has(partId)) continue;
+      affectedPartIds.add(partId);
+      queue.push(...(childrenByParent.get(partId) ?? []));
+    }
+    const objectNamesForParts = (partIds: string[]) =>
+      partIds.flatMap((partId) => partById.get(partId)?.meshObjectIds ?? []).filter((objectName): objectName is string => Boolean(objectName));
     return {
       ...kinematicEditTarget,
       origin: joint.origin.position,
       axis: joint.axis,
+      parentObjectNames: objectNamesForParts([joint.parentPartId]),
+      childObjectNames: objectNamesForParts([joint.childPartId]),
+      affectedObjectNames: objectNamesForParts([...affectedPartIds]),
     };
   }, [document.nodes, kinematicEditTarget]);
 
@@ -2317,8 +2338,17 @@ export const App = () => {
       origin: joint.origin.position,
       axis: joint.axis,
       axisPointA: mode === 'pick-axis-b' ? kinematicEditTarget?.axisPointA : undefined,
+      focusKey: `${mode}-${jointId}-${Date.now()}`,
     });
-    setStatus(mode === 'pick-origin' ? 'Pick joint origin in viewport' : mode === 'axis-gizmo' ? 'Drag axis gizmo in viewport' : 'Pick axis point in viewport');
+    setStatus(
+      mode === 'show-joint'
+        ? 'Showing joint in viewport'
+        : mode === 'pick-origin'
+          ? 'Pick joint origin in viewport'
+          : mode === 'axis-gizmo'
+            ? 'Drag axis gizmo in viewport'
+            : 'Pick axis point in viewport',
+    );
   };
 
   const handleKinematicPointPick = (event: KinematicPointPickEvent) => {
@@ -2946,6 +2976,7 @@ export const App = () => {
                 rejectKinematicJoint={rejectKinematicJointForNode}
                 deleteKinematicJoint={deleteKinematicJointForNode}
                 createKinematicJoint={createKinematicJointForNode}
+                saveKinematicConfiguration={save}
                 randomizeGenerator={randomizeGenerator}
               />
             </>
@@ -3266,6 +3297,53 @@ type KinematicGraphPanelProps = {
   rejectKinematicJoint: (nodeId: string, jointId: string) => void;
   deleteKinematicJoint: (nodeId: string, jointId: string) => void;
   createKinematicJoint: (nodeId: string, selectedPartNames: string[]) => void;
+  saveKinematicConfiguration: () => void | Promise<void>;
+};
+
+type MechanicalInspectionPhase = 'idle' | 'running' | 'stopped' | 'done';
+
+type MechanicalInspectionState = {
+  phase: MechanicalInspectionPhase;
+  index: number;
+  step: 'forward' | 'back' | 'home';
+  results: Record<string, 'pending' | 'testing' | 'pass'>;
+};
+
+const mechanicalTooltips = {
+  analyze:
+    'Analyze Mechanics reads the imported parts and KinematicGraph V2, counts candidates and validation issues, and does not change the original geometry.',
+  showJoint: 'Show Joint centers the camera on this pivot and highlights the parent, child, axis and affected chain in the viewport.',
+  pickOrigin: 'Pick Origin lets you click the real pivot point on the model surface when the joint rotates or slides around the wrong place.',
+  axisGizmo: 'Axis Gizmo shows a 3D handle in the viewport so you can drag the movement axis until rotation or sliding follows the real mechanism.',
+  twoPointAxis: 'Two-Point Axis uses two clicked points on the model and stores normalize(B-A) as the joint axis.',
+  revolute: 'Revolute means the child part rotates around the selected axis with lower and upper limits.',
+  prismatic: 'Prismatic means the child part slides along the selected axis with lower and upper travel limits.',
+  parent: 'Parent is the fixed reference side of the joint; movement propagates from parent to child.',
+  child: 'Child is the moving side of the joint; the affected chain follows this part.',
+  home: 'Home returns every tested joint value to its saved neutral pose without deleting the kinematic definition.',
+  mimic: 'Mimic links this joint to a driver joint, useful for grippers where two fingers move in opposite directions.',
+  validate: 'Validate checks graph structure, floating parts, invalid joints and incompatible values before saving.',
+  save: 'Save stores the inspected kinematic configuration in the current project/autosave so reload keeps the same behavior.',
+  testAll: 'Test All Joints moves one joint at a time within safe limits, returns to Home after each test and never auto-saves a definition.',
+  stop: 'Stop immediately interrupts the running movement test and returns the model to Home.',
+};
+
+const humanJointState = (joint: KinematicJoint, issues: string[]) => {
+  if (joint.status === 'rejected') return 'Invalid';
+  if (issues.length) return 'Needs attention';
+  if (joint.status === 'validated' || joint.status === 'manual') return 'Validated';
+  return 'Candidate';
+};
+
+const issueText = (code: string) => {
+  const readable: Record<string, string> = {
+    MULTIPLE_PARENTS: 'A part has more than one mechanical parent.',
+    ORPHAN_PART: 'A detected part is floating outside the reachable chain.',
+    INVALID_LIMITS: 'The movement limits contradict each other.',
+    MISSING_PART: 'A joint references a part that is not available.',
+    KINEMATIC_CYCLE: 'The mechanical chain loops back into itself.',
+  };
+  return readable[code] ?? code.replace(/_/g, ' ').toLowerCase();
 };
 
 const KinematicGraphPanel = ({
@@ -3279,11 +3357,15 @@ const KinematicGraphPanel = ({
   rejectKinematicJoint,
   deleteKinematicJoint,
   createKinematicJoint,
+  saveKinematicConfiguration,
 }: KinematicGraphPanelProps) => {
   const geometry = node.geometry as ImportedModelGeometry;
   const graph = graphFromImportedGeometry(geometry);
   const partById = new Map(graph.parts.map((part) => [part.id, part]));
   const validatedCount = graph.joints.filter((joint) => joint.status === 'validated').length;
+  const candidateCount = graph.joints.filter((joint) => joint.status === 'candidate').length;
+  const rejectedCount = graph.joints.filter((joint) => joint.status === 'rejected').length;
+  const coupledCount = graph.joints.filter((joint) => joint.coupling).length;
   const movableParts = graph.parts.filter((part) => !part.static).length;
   const validationIssues = validateKinematicGraph(graph);
   const issueByJoint = new Map<string, string[]>();
@@ -3292,6 +3374,70 @@ const KinematicGraphPanel = ({
     issueByJoint.set(issue.jointId, [...(issueByJoint.get(issue.jointId) ?? []), issue.code]);
   });
   const state = geometry.kinematicState ?? createHomeKinematicState(graph);
+  const [selectedJointId, setSelectedJointId] = useState<string | undefined>(() => graph.joints[0]?.id);
+  const [simpleMode, setSimpleMode] = useState(true);
+  const [guideVisible, setGuideVisible] = useState(() => !window.localStorage.getItem('asset-forge.mechanical-guide-dismissed'));
+  const [analyzed, setAnalyzed] = useState(false);
+  const [repairJointId, setRepairJointId] = useState<string | undefined>();
+  const [inspectionMessage, setInspectionMessage] = useState('Import a model, analyze mechanics, then test and validate each real movement.');
+  const [autoTest, setAutoTest] = useState<MechanicalInspectionState>({ phase: 'idle', index: 0, step: 'forward', results: {} });
+  const selectedJoint = graph.joints.find((joint) => joint.id === selectedJointId) ?? graph.joints[0];
+  const needsReviewCount = graph.joints.filter((joint) => humanJointState(joint, issueByJoint.get(joint.id) ?? []) === 'Needs attention').length;
+
+  useEffect(() => {
+    if (!selectedJointId || !graph.joints.some((joint) => joint.id === selectedJointId)) {
+      setSelectedJointId(graph.joints[0]?.id);
+    }
+  }, [graph.joints, selectedJointId]);
+
+  const sliderRange = (joint: KinematicJoint) => {
+    if (joint.type === 'prismatic') return { min: joint.limits?.lower ?? -1, max: joint.limits?.upper ?? 1, step: 0.01 };
+    if (joint.type === 'continuous') return { min: -Math.PI * 2, max: Math.PI * 2, step: 0.01 };
+    return { min: joint.limits?.lower ?? -Math.PI, max: joint.limits?.upper ?? Math.PI, step: 0.01 };
+  };
+
+  const testValue = (joint: KinematicJoint, direction: -1 | 1) => {
+    const range = sliderRange(joint);
+    const softPositive = Math.min(range.max, joint.type === 'prismatic' ? 0.2 : 0.65);
+    const softNegative = Math.max(range.min, joint.type === 'prismatic' ? -0.2 : -0.65);
+    const value = direction > 0 ? softPositive : softNegative;
+    return Math.abs(value) < 0.0001 ? direction * Math.min(0.25, Math.max(Math.abs(range.max), Math.abs(range.min), 0.25)) : value;
+  };
+
+  useEffect(() => {
+    if (autoTest.phase !== 'running') return undefined;
+    const joint = graph.joints[autoTest.index];
+    if (!joint) {
+      resetKinematicPose(node.id);
+      setAutoTest((current) => ({ ...current, phase: 'done', step: 'home', index: Math.max(0, graph.joints.length - 1) }));
+      setInspectionMessage('Everything looks correct if each highlighted joint moved as expected. Review joints if a motion looked wrong.');
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (autoTest.step === 'forward') {
+        setSelectedJointId(joint.id);
+        startKinematicEdit(node.id, joint.id, 'show-joint');
+        setKinematicJointValue(node.id, joint.id, testValue(joint, 1));
+        setAutoTest((current) => ({ ...current, step: 'back', results: { ...current.results, [joint.id]: 'testing' } }));
+        return;
+      }
+      if (autoTest.step === 'back') {
+        setKinematicJointValue(node.id, joint.id, testValue(joint, -1));
+        setAutoTest((current) => ({ ...current, step: 'home' }));
+        return;
+      }
+      setKinematicJointValue(node.id, joint.id, 0);
+      setAutoTest((current) => ({
+        ...current,
+        index: current.index + 1,
+        step: 'forward',
+        results: { ...current.results, [joint.id]: 'pass' },
+      }));
+    }, 520);
+
+    return () => window.clearTimeout(timer);
+  }, [autoTest, graph.joints, node.id, resetKinematicPose, setKinematicJointValue, startKinematicEdit]);
 
   const updateAxis = (joint: KinematicJoint, axis: [number, number, number]) => {
     updateKinematicJoint(node.id, joint.id, { axis });
@@ -3301,37 +3447,153 @@ const KinematicGraphPanel = ({
     updateKinematicJoint(node.id, joint.id, { origin: { ...joint.origin, position } });
   };
 
-  const sliderRange = (joint: KinematicJoint) => {
-    if (joint.type === 'prismatic') return { min: joint.limits?.lower ?? -1, max: joint.limits?.upper ?? 1, step: 0.01 };
-    if (joint.type === 'continuous') return { min: -Math.PI * 2, max: Math.PI * 2, step: 0.01 };
-    return { min: joint.limits?.lower ?? -Math.PI, max: joint.limits?.upper ?? Math.PI, step: 0.01 };
+  const startInspection = () => {
+    resetKinematicPose(node.id);
+    setAnalyzed(true);
+    setAutoTest({
+      phase: 'running',
+      index: 0,
+      step: 'forward',
+      results: Object.fromEntries(graph.joints.map((joint) => [joint.id, 'pending'])),
+    });
+    setInspectionMessage('Mechanical Inspection is running. Use Stop if any movement is unsafe or clearly wrong.');
+  };
+
+  const stopInspection = () => {
+    resetKinematicPose(node.id);
+    setAutoTest((current) => ({ ...current, phase: 'stopped', step: 'home' }));
+    setInspectionMessage('Inspection stopped and model returned to Home.');
+  };
+
+  const validateGraph = () => {
+    setAnalyzed(true);
+    setInspectionMessage(validationIssues.length ? 'Review joints before saving. Validation found issues that need correction.' : 'Graph validated. You can save and reload this setup.');
+  };
+
+  const repairWith = (joint: KinematicJoint, problem: string) => {
+    setRepairJointId(joint.id);
+    setInspectionMessage(`Repair mode: ${problem}. Follow the highlighted tool for ${joint.name}.`);
+    if (problem === 'Wrong pivot') startKinematicEdit(node.id, joint.id, 'pick-origin');
+    if (problem === 'Wrong axis') startKinematicEdit(node.id, joint.id, 'axis-gizmo');
+    if (problem === 'Rotates instead of slides') updateKinematicJoint(node.id, joint.id, { type: 'prismatic' });
+    if (problem === 'Slides instead of rotates') updateKinematicJoint(node.id, joint.id, { type: 'revolute' });
+    if (problem === 'Inverted direction') updateAxis(joint, [-joint.axis[0], -joint.axis[1], -joint.axis[2]]);
+  };
+
+  const setupSteps = [
+    { label: 'Import Model', status: 'completed' },
+    { label: 'Analyze Parts', status: analyzed || graph.parts.length ? 'completed' : 'pending' },
+    { label: 'Review Joints', status: graph.joints.length ? (needsReviewCount ? 'warning' : 'completed') : 'pending' },
+    { label: 'Test Movements', status: autoTest.phase === 'done' ? 'completed' : autoTest.phase === 'running' ? 'in-progress' : 'pending' },
+    { label: 'Fix Problems', status: needsReviewCount || repairJointId ? 'warning' : 'completed' },
+    { label: 'Validate', status: validationIssues.length ? 'warning' : 'completed' },
+    { label: 'Save', status: 'pending' },
+  ];
+
+  const gripperDrivers = graph.joints.filter((joint) => graph.joints.some((candidate) => candidate.coupling?.driverJointId === joint.id));
+
+  const dismissGuide = () => {
+    window.localStorage.setItem('asset-forge.mechanical-guide-dismissed', 'true');
+    setGuideVisible(false);
   };
 
   return (
-    <div className="kinematic-graph-panel">
+    <div className={simpleMode ? 'kinematic-graph-panel mechanical-panel simple' : 'kinematic-graph-panel mechanical-panel advanced'}>
       <div className="section-title-row">
-        <h4>Kinematic Authoring</h4>
-        <span>Kinematic Graph | {graph.joints.length} joints</span>
+        <h4>Mechanical Setup</h4>
+        <span>Kinematic Graph V2 | Kinematic Authoring | {graph.joints.length} joints</span>
       </div>
-      <div className="graph-readiness">
+
+      {guideVisible && (
+        <div className="mechanical-guide">
+          <strong>First setup</strong>
+          <p>Load the robot, analyze mechanics, show each joint, test movement, correct wrong pivots or axes, then validate and save.</p>
+          <button title="Dismiss this first experience guide" onClick={dismissGuide}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      <div className="mechanical-mode-toggle">
+        <button className={simpleMode ? 'active' : ''} title="Simple Mode shows the guided mechanical workflow for daily inspection." onClick={() => setSimpleMode(true)}>
+          Simple
+        </button>
+        <button className={!simpleMode ? 'active' : ''} title="Advanced Mode shows raw axis, origin, limits and mimic controls for precise calibration." onClick={() => setSimpleMode(false)}>
+          Advanced
+        </button>
+      </div>
+
+      <div className="mechanical-steps" aria-label="Mechanical Setup Flow">
+        {setupSteps.map((step) => (
+          <span key={step.label} className={`step-${step.status}`}>
+            {step.label}
+          </span>
+        ))}
+      </div>
+
+      <div className="mechanical-summary">
         <span>Parts {graph.parts.length}</span>
-        <span>Movable {movableParts}</span>
-        <span>Validated {validatedCount}</span>
+        <span>Joint candidates {candidateCount}</span>
+        <span>Validated joints {validatedCount}</span>
+        <span>Needs review {needsReviewCount}</span>
+        <span>Rejected {rejectedCount}</span>
+        <span>Coupled {coupledCount}</span>
+        <span>Graph {validationIssues.length ? 'Review' : 'Valid'}</span>
       </div>
       <div className="kinematic-authoring-actions">
-        <button title="Create joint from selected parts" disabled={selectedPartNames.length < 2} onClick={() => createKinematicJoint(node.id, selectedPartNames)}>
+        <button
+          title={mechanicalTooltips.analyze}
+          onClick={() => {
+            setAnalyzed(true);
+            setInspectionMessage(`${graph.parts.length} parts, ${graph.joints.length} joints and ${validationIssues.length} validation issues found.`);
+          }}
+        >
+          <Activity size={14} />
+          <span>Analyze Mechanics</span>
+        </button>
+        <button title="Create a candidate joint from exactly two selected model parts." disabled={selectedPartNames.length < 2} onClick={() => createKinematicJoint(node.id, selectedPartNames)}>
           <Hammer size={14} />
           <span>Create Joint</span>
         </button>
-        <button title="Reset all joint tests to home" onClick={() => resetKinematicPose(node.id)}>
+        <button title={mechanicalTooltips.testAll} disabled={!graph.joints.length || autoTest.phase === 'running'} onClick={startInspection}>
+          <Play size={14} />
+          <span>Test All Joints</span>
+        </button>
+        <button title={mechanicalTooltips.stop} disabled={autoTest.phase !== 'running'} onClick={stopInspection}>
+          <Pause size={14} />
+          <span>Stop</span>
+        </button>
+        <button title={mechanicalTooltips.home} onClick={() => resetKinematicPose(node.id)}>
           <RotateCw size={14} />
           <span>Home</span>
         </button>
+        <button title={mechanicalTooltips.validate} onClick={validateGraph}>
+          <ShieldCheck size={14} />
+          <span>Validate</span>
+        </button>
+        <button
+          title={mechanicalTooltips.save}
+          onClick={() => {
+            void saveKinematicConfiguration();
+            setInspectionMessage('Mechanical setup saved in the current project.');
+          }}
+        >
+          <Save size={14} />
+          <span>Save</span>
+        </button>
       </div>
+      <div className="mechanical-status-line">{inspectionMessage}</div>
+      <details className="context-help">
+        <summary title="Open contextual help for Mechanical Setup">
+          <HelpCircle size={14} />
+          <span>Help</span>
+        </summary>
+        <p>Parent is the reference part, child is the moving part, origin is the pivot, axis is the rotation or slide direction, and limits protect the test range.</p>
+      </details>
       {validationIssues.length ? (
         <div className="kinematic-validation-summary">
           {validationIssues.slice(0, 3).map((issue) => (
-            <span key={`${issue.code}-${issue.jointId ?? issue.partId ?? 'graph'}`}>{issue.code}</span>
+            <span key={`${issue.code}-${issue.jointId ?? issue.partId ?? 'graph'}`}>{issueText(issue.code)}</span>
           ))}
         </div>
       ) : (
@@ -3339,17 +3601,57 @@ const KinematicGraphPanel = ({
           <span>VALID GRAPH</span>
         </div>
       )}
+      {autoTest.phase !== 'idle' && (
+        <div className="mechanical-test-results">
+          <strong>{autoTest.phase === 'done' ? 'Everything looks correct' : autoTest.phase === 'stopped' ? 'Inspection stopped' : `Testing ${autoTest.index + 1}/${graph.joints.length}`}</strong>
+          {graph.joints.slice(0, 8).map((joint) => (
+            <span key={joint.id} className={`result-${autoTest.results[joint.id] ?? 'pending'}`}>
+              {joint.name}: {autoTest.results[joint.id] ?? 'pending'}
+            </span>
+          ))}
+          {autoTest.phase === 'done' && <button title="Review joints that looked mechanically wrong during the automatic inspection." onClick={() => setInspectionMessage('Select the wrong joint, choose Movement incorrect, then choose the repair reason.')}>Review joints</button>}
+        </div>
+      )}
       {graph.joints.length ? (
         <div className="kinematic-joint-list">
           {graph.joints.map((joint) => (
-            <div key={joint.id} className="kinematic-joint-row">
+            <div key={joint.id} className={selectedJoint?.id === joint.id ? 'kinematic-joint-row selected' : 'kinematic-joint-row'}>
               <div className="joint-title-line">
-                <strong title={joint.name}>{joint.name}</strong>
-                <span>{joint.status}</span>
+                <button title={`Select joint ${joint.name} and open its movement controls.`} onClick={() => setSelectedJointId(joint.id)}>
+                  <strong title={joint.name}>{joint.name}</strong>
+                </button>
+                <span>{humanJointState(joint, issueByJoint.get(joint.id) ?? [])}</span>
               </div>
+              <div className="joint-readable-links">
+                <span title={mechanicalTooltips.parent}>Parent: {partById.get(joint.parentPartId)?.name ?? joint.parentPartId}</span>
+                <span title={mechanicalTooltips.child}>Child: {partById.get(joint.childPartId)?.name ?? joint.childPartId}</span>
+              </div>
+              <div className="joint-visual-tools primary">
+                <button title={mechanicalTooltips.showJoint} onClick={() => startKinematicEdit(node.id, joint.id, 'show-joint')}>
+                  <Eye size={14} />
+                  <span>Show Joint</span>
+                </button>
+                <button title="Movement correct marks this candidate as validated after visual confirmation." onClick={() => acceptKinematicJoint(node.id, joint.id)}>
+                  <Check size={14} />
+                  <span>Movement correct</span>
+                </button>
+                <button title="Movement incorrect opens guided repair choices for pivot, axis, type, limits or part selection." onClick={() => setRepairJointId(repairJointId === joint.id ? undefined : joint.id)}>
+                  <AlertTriangle size={14} />
+                  <span>Movement incorrect</span>
+                </button>
+              </div>
+              {repairJointId === joint.id && (
+                <div className="guided-repair">
+                  {['Wrong pivot', 'Wrong axis', 'Rotates instead of slides', 'Slides instead of rotates', 'Inverted direction', 'Wrong limits', 'Wrong piece', 'Other'].map((problem) => (
+                    <button key={problem} title={`Repair path: ${problem}`} onClick={() => repairWith(joint, problem)}>
+                      {problem}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="joint-authoring-grid">
                 <label>
-                  <span>Parent</span>
+                  <span title={mechanicalTooltips.parent}>Parent</span>
                   <select value={joint.parentPartId} onChange={(event) => updateKinematicJoint(node.id, joint.id, { parentPartId: event.target.value })}>
                     {graph.parts.map((part) => (
                       <option key={part.id} value={part.id}>
@@ -3359,7 +3661,7 @@ const KinematicGraphPanel = ({
                   </select>
                 </label>
                 <label>
-                  <span>Child</span>
+                  <span title={mechanicalTooltips.child}>Child</span>
                   <select value={joint.childPartId} onChange={(event) => updateKinematicJoint(node.id, joint.id, { childPartId: event.target.value })}>
                     {graph.parts.map((part) => (
                       <option key={part.id} value={part.id}>
@@ -3369,7 +3671,7 @@ const KinematicGraphPanel = ({
                   </select>
                 </label>
                 <label>
-                  <span>Type</span>
+                  <span title={`${mechanicalTooltips.revolute} ${mechanicalTooltips.prismatic}`}>Type</span>
                   <select value={joint.type} onChange={(event) => updateKinematicJoint(node.id, joint.id, { type: event.target.value as KinematicJoint['type'] })}>
                     {['fixed', 'revolute', 'continuous', 'prismatic'].map((type) => (
                       <option key={type} value={type}>
@@ -3384,26 +3686,28 @@ const KinematicGraphPanel = ({
                   <button title="Use Z axis" onClick={() => updateAxis(joint, [0, 0, 1])}>Z</button>
                 </div>
               </div>
-              <VectorEditor
-                label="Axis"
-                values={joint.axis}
-                step={0.01}
-                onChange={(index, value) => {
-                  const next: [number, number, number] = [...joint.axis];
-                  next[index] = value;
-                  updateAxis(joint, next);
-                }}
-              />
-              <VectorEditor
-                label="Origin"
-                values={joint.origin.position}
-                step={0.01}
-                onChange={(index, value) => {
-                  const next: [number, number, number] = [...joint.origin.position];
-                  next[index] = value;
-                  updateOrigin(joint, next);
-                }}
-              />
+              <details className="advanced-kinematic-fields" open={!simpleMode}>
+                <summary title="Advanced Mode exposes raw numeric axis and origin values for precise calibration.">Advanced vectors and limits</summary>
+                <VectorEditor
+                  label="Axis"
+                  values={joint.axis}
+                  step={0.01}
+                  onChange={(index, value) => {
+                    const next: [number, number, number] = [...joint.axis];
+                    next[index] = value;
+                    updateAxis(joint, next);
+                  }}
+                />
+                <VectorEditor
+                  label="Origin"
+                  values={joint.origin.position}
+                  step={0.01}
+                  onChange={(index, value) => {
+                    const next: [number, number, number] = [...joint.origin.position];
+                    next[index] = value;
+                    updateOrigin(joint, next);
+                  }}
+                />
               <div className="joint-authoring-grid compact">
                 <label>
                   <span>Min</span>
@@ -3426,7 +3730,7 @@ const KinematicGraphPanel = ({
               </div>
               <div className="joint-authoring-grid compact">
                 <label>
-                  <span>Mimic</span>
+                  <span title={mechanicalTooltips.mimic}>Mimic</span>
                   <select
                     value={joint.coupling?.driverJointId ?? ''}
                     onChange={(event) =>
@@ -3473,20 +3777,21 @@ const KinematicGraphPanel = ({
                   />
                 </label>
               </div>
+              </details>
               <div className="joint-visual-tools">
-                <button title="Pick joint origin on model" onClick={() => startKinematicEdit(node.id, joint.id, 'pick-origin')}>
+                <button title={mechanicalTooltips.pickOrigin} onClick={() => startKinematicEdit(node.id, joint.id, 'pick-origin')}>
                   <Circle size={14} />
                   <span>Pick Origin</span>
                 </button>
-                <button title="Edit axis with viewport gizmo" onClick={() => startKinematicEdit(node.id, joint.id, 'axis-gizmo')}>
+                <button title={mechanicalTooltips.axisGizmo} onClick={() => startKinematicEdit(node.id, joint.id, 'axis-gizmo')}>
                   <Move3D size={14} />
                   <span>Axis Gizmo</span>
                 </button>
-                <button title="Pick first axis point" onClick={() => startKinematicEdit(node.id, joint.id, 'pick-axis-a')}>
+                <button title={mechanicalTooltips.twoPointAxis} onClick={() => startKinematicEdit(node.id, joint.id, 'pick-axis-a')}>
                   <Square size={14} />
                   <span>Axis A</span>
                 </button>
-                <button title="Pick second axis point" onClick={() => startKinematicEdit(node.id, joint.id, 'pick-axis-b')}>
+                <button title={mechanicalTooltips.twoPointAxis} onClick={() => startKinematicEdit(node.id, joint.id, 'pick-axis-b')}>
                   <Square size={14} />
                   <span>Axis B</span>
                 </button>
@@ -3515,13 +3820,21 @@ const KinematicGraphPanel = ({
                 <dt>Evidence</dt>
                 <dd>{joint.evidence.map((item) => item.type).join(', ') || 'none'}</dd>
                 <dt>Issues</dt>
-                <dd>{issueByJoint.get(joint.id)?.join(', ') ?? 'none'}</dd>
+                <dd>{issueByJoint.get(joint.id)?.map(issueText).join(', ') ?? 'none'}</dd>
               </dl>
             </div>
           ))}
         </div>
       ) : (
-        <div className="empty-state">No kinematic joints yet. Select two parts and create a candidate joint.</div>
+        <div className="empty-state">No joints yet. Select two visible parts in Parts mode, then create a candidate joint.</div>
+      )}
+      {gripperDrivers.length > 0 && (
+        <div className="gripper-control">
+          <strong>Gripper</strong>
+          {gripperDrivers.slice(0, 2).map((joint) => (
+            <Slider key={joint.id} label="Open / Close" value={state.jointValues[joint.id] ?? 0} {...sliderRange(joint)} onChange={(value) => setKinematicJointValue(node.id, joint.id, value)} />
+          ))}
+        </div>
       )}
     </div>
   );
@@ -3552,6 +3865,7 @@ type GeometryInspectorProps = {
   rejectKinematicJoint: (nodeId: string, jointId: string) => void;
   deleteKinematicJoint: (nodeId: string, jointId: string) => void;
   createKinematicJoint: (nodeId: string, selectedPartNames: string[]) => void;
+  saveKinematicConfiguration: () => void | Promise<void>;
   randomizeGenerator: () => void;
 };
 
@@ -3580,6 +3894,7 @@ const GeometryInspector = ({
   rejectKinematicJoint,
   deleteKinematicJoint,
   createKinematicJoint,
+  saveKinematicConfiguration,
   randomizeGenerator,
 }: GeometryInspectorProps) => {
   const geometry = node.geometry;
@@ -3664,6 +3979,7 @@ const GeometryInspector = ({
           rejectKinematicJoint={rejectKinematicJoint}
           deleteKinematicJoint={deleteKinematicJoint}
           createKinematicJoint={createKinematicJoint}
+          saveKinematicConfiguration={saveKinematicConfiguration}
         />
         <button className={demoActive ? 'smart-motion-button active' : 'smart-motion-button'} disabled={!geometry.joints.length} onClick={toggleImportedMotionDemo}>
           {demoActive ? <Pause size={16} /> : <Activity size={16} />}
