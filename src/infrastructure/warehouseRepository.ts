@@ -241,21 +241,9 @@ export const saveWarehouseItems = async (projectId: string, items: PartWarehouse
 };
 
 export const saveWarehouseGlbItem = async (projectId: string, item: PartWarehouseItem, glb: Blob, options: { overwrite?: boolean } = {}) => {
-  const metadata = encodeURIComponent(
-    JSON.stringify({
-      name: item.name,
-      itemType: item.itemType,
-      category: item.category,
-      className: item.className,
-      code: item.code,
-      objectName: item.itemType === 'part' ? item.objectName : item.name,
-      sourceAssetName: item.sourceAssetName,
-      material: item.itemType === 'part' ? item.material : undefined,
-      thumbnailDataUrl: item.thumbnailDataUrl,
-    }),
-  );
+  const key = warehouseItemKey(item);
   const response = await fetch(
-    `/__warehouse/save-glb?projectId=${encodeURIComponent(projectId)}&key=${encodeURIComponent(warehouseItemKey(item))}&metadata=${metadata}&overwrite=${options.overwrite ? '1' : '0'}`,
+    `/__warehouse/save-glb?projectId=${encodeURIComponent(projectId)}&key=${encodeURIComponent(key)}&overwrite=${options.overwrite ? '1' : '0'}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'model/gltf-binary' },
@@ -263,7 +251,31 @@ export const saveWarehouseGlbItem = async (projectId: string, item: PartWarehous
     },
   );
   if (!response.ok) throw new Error('Physical GLB warehouse save failed.');
-  return (await response.json()) as { saved: number; skipped: number; replaced?: number };
+  const result = (await response.json()) as { saved: number; skipped: number; replaced?: number };
+  if (result.saved) {
+    await fetch('/__warehouse/metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId,
+        key,
+        metadata: {
+          name: item.name,
+          itemType: item.itemType,
+          category: item.category,
+          className: item.className,
+          code: item.code,
+          objectName: item.itemType === 'part' ? item.objectName : item.name,
+          sourceAssetName: item.sourceAssetName,
+          material: item.itemType === 'part' ? item.material : undefined,
+          thumbnailDataUrl: item.thumbnailDataUrl,
+          functionalComponent: item.itemType === 'part' ? item.functionalComponent : undefined,
+          functionalAssembly: item.itemType === 'assembly' ? item.functionalAssembly : undefined,
+        },
+      }),
+    }).catch(() => undefined);
+  }
+  return result;
 };
 
 export const saveWarehouseThumbnail = async (projectId: string, item: PartWarehouseItem, thumbnailDataUrl: string) => {

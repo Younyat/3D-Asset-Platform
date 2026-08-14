@@ -25,6 +25,8 @@ El objetivo principal es reducir el trabajo manual necesario para preparar model
 - Guardado fisico de piezas y conjuntos como `.glb` dentro de `project-warehouse/<projectId>/`.
 - Guardado permanente de cambios del workspace: color, transformaciones, copias y objetos importados.
 - Borrado permanente desde workspace o warehouse, eliminando tambien el fichero local asociado.
+- Componentes funcionales persistentes con interfaces mecanicas, propiedades, subgrafo cinematico y validacion de assemblies.
+- Kinematic Authoring M1 para corregir joints, ejes arbitrarios, origen fisico, limites, estado home y validacion del grafo cinematico.
 - Preflight de exportacion y perfiles GLB para uso generico, Unity, Unreal y Godot.
 - Modo navegador y base Tauri para aplicacion de escritorio.
 
@@ -161,6 +163,55 @@ Los detalles completos estan en:
 
 - [Manual de uso: warehouse, piezas y workspace](docs/manual-uso-warehouse.md)
 
+### 7. Base Mecanica Funcional
+
+Las piezas reutilizables ya no se tratan solo como geometria. Cada pieza almacenada puede llevar un `FunctionalComponent` con:
+
+- geometria y material;
+- transformacion local, origen y limites;
+- propiedades mecanicas inferidas;
+- interfaces mecanicas como ejes, bisagras, mounts, shafts, rails, supports o grippers;
+- subgrafo `KinematicGraph` asociado a la pieza original.
+
+Cuando se guarda un conjunto, la plataforma crea un `FunctionalAssembly` persistente. El assembly conserva componentes, conexiones sugeridas, joints, limites, jerarquia y un `KinematicGraph` reconstruido del conjunto.
+
+El validador de assemblies detecta componentes flotantes, conexiones incompatibles, limites contradictorios, referencias rotas, duplicados y ciclos cinematicos antes de considerar valido el conjunto.
+
+### 8. Kinematic Authoring M1
+
+El inspector del modelo importado incluye `Kinematic Authoring`, una capa no destructiva basada en `KinematicGraph V2`. Su objetivo es reconstruir o corregir una maquina como una cadena real:
+
+```text
+Rigid Part / Link -> Joint -> Rigid Part / Link
+```
+
+Funciones actuales:
+
+- crear un joint candidato desde dos piezas seleccionadas en modo `Parts`;
+- editar `Parent`, `Child`, `Type`, `Axis`, `Origin` y limites;
+- usar atajos de eje `X`, `Y`, `Z` o escribir un eje arbitrario como `[0.707, 0.707, 0]`;
+- seleccionar el `Joint Origin` directamente sobre el modelo en el viewport;
+- editar visualmente el eje con un gizmo 3D;
+- definir un eje con `Two-Point Axis`, seleccionando A y B sobre el modelo;
+- ver pivot, frame local y eje activo como helpers de escena no destructivos;
+- definir coupling/mimic entre joints con `driverJointId`, `multiplier` y `offset`, por ejemplo dos dedos de gripper con movimiento opuesto;
+- probar el joint con un slider sin reimportar ni reconstruir el modelo;
+- aceptar, rechazar, borrar o resetear el joint;
+- volver a `Home` para recuperar la configuracion cero;
+- validar raiz, referencias, ejes, origen, limites, ciclos, duplicados y piezas huerfanas.
+
+La definicion estructural queda en `kinematicGraph`; la pose de prueba queda separada en `kinematicState`. Esto evita acumular errores y permite guardar/recuperar el mecanismo sin convertir la geometria original en un asset destructivo.
+
+### Persistencia De M1
+
+M1 separa tres responsabilidades:
+
+- `kinematicGraph`: definicion mecanica persistente, con joints, parent/child, origins, axes, limits, status, evidence y mimic.
+- `kinematicState`: estado de pose/home persistente o restaurable, sin reescribir la definicion.
+- asset 3D pesado: geometria original o referencia al asset persistente correspondiente.
+
+En navegador, los modelos grandes no deben depender de duplicarse dentro de `localStorage`. La definicion cinemática puede persistirse como proyecto compacto y el asset debe recuperarse desde el mecanismo persistente disponible, como Warehouse/storage fisico o referencia de proyecto. El estado visual temporal de la UI no forma parte de la definicion mecanica.
+
 ## Estrategia De Rendimiento
 
 La plataforma esta optimizada para evitar recargas innecesarias:
@@ -178,8 +229,8 @@ Esto es clave para modelos densos como `IRAmk4.3ds`, que contiene millones de tr
 
 ```text
 src/
-  application/          Perfiles de exportacion, validacion y flujos de proyecto
-  domain/               Tipos principales, factories y generadores procedurales
+  application/          Perfiles, validacion, cinematica, flujos de proyecto y modelo mecanico funcional
+  domain/               Tipos principales, kinematics, mechanics, factories y generadores
   infrastructure/       Importadores, escena Three.js, exportacion GLB y storage
   presentation/         UI React, inspector, viewport y controles del editor
 src-tauri/              Base para aplicacion de escritorio
@@ -281,8 +332,16 @@ Comandos principales de validacion:
 
 ```bash
 npm run build
+npm run test:kinematics
+npm run test:kinematics:e2e
+npm run test:articulation
 npm run test:render
 npm run test:parts
+npm run test:all
 ```
+
+`test:kinematics` cubre K01-K30: normalizacion de ejes, ejes invalidos, eje arbitrario, pivote correcto, revolute, continuous, prismatic, fixed, limites, propagacion padre-hijo, cadenas con incoming/outgoing joint, ciclos, huerfanos, IDs duplicados, NaN/Infinity, two-point axis, origin picking, mimic/coupling, logical controls, home sin drift, no destructivo, rejected joints, quaternion normalizado, multiples padres y rendimiento sintetico.
+
+`test:kinematics:e2e` usa Playwright con un modelo robotico real para validar creacion manual de joint, picking visual, helpers de pivot/eje, mimic, guardado, reload, migracion legacy y proteccion no destructiva del asset fuente.
 
 El aviso de bundle grande es esperado porque la aplicacion incluye Three.js y varios loaders 3D. No bloquea la build de produccion.

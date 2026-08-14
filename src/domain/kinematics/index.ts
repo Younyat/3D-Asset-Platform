@@ -5,6 +5,8 @@ export type {
   JointValidationResult,
   KinematicGraph,
   KinematicJoint,
+  KinematicLogicalControl,
+  KinematicState,
   MechanicalPart,
   OrientedBounds3D,
   QuaternionTuple,

@@ -1,5 +1,7 @@
 import { AssetDocument, SceneNode, ValidationIssue } from '../domain/model';
 import { getGeneratorDefinition } from '../domain/generators';
+import { validateFunctionalAssembly } from './mechanics/functionalModel';
+import { validateKinematicGraph } from './kinematics/kinematicAuthoring';
 
 const finiteTuple = (values: number[]) => values.every(Number.isFinite);
 
@@ -49,6 +51,17 @@ const validateNode = (node: SceneNode): ValidationIssue[] => {
         nodeId: node.id,
       });
     }
+
+    if (node.geometry.kinematicGraph) {
+      validateKinematicGraph(node.geometry.kinematicGraph).forEach((issue) => {
+        issues.push({
+          severity: issue.severity,
+          code: `KINEMATIC_${issue.code}`,
+          message: `${node.name}: ${issue.message}`,
+          nodeId: node.id,
+        });
+      });
+    }
   }
 
   if ('generatorId' in node.geometry) {
@@ -85,6 +98,17 @@ const validateNode = (node: SceneNode): ValidationIssue[] => {
 
 export const validateProject = (document: AssetDocument): ValidationIssue[] => {
   const issues = document.nodes.flatMap(validateNode);
+
+  (document.partWarehouse ?? []).forEach((item) => {
+    if (item.itemType !== 'assembly' || !item.functionalAssembly) return;
+    validateFunctionalAssembly(item.functionalAssembly).forEach((assemblyIssue) => {
+      issues.push({
+        severity: assemblyIssue.severity,
+        code: `ASSEMBLY_${assemblyIssue.code}`,
+        message: `${item.name}: ${assemblyIssue.message}`,
+      });
+    });
+  });
 
   if (document.nodes.length === 0) {
     issues.push({

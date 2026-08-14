@@ -83,10 +83,31 @@ export type KinematicJoint = {
   evidence: JointEvidence[];
   status: 'candidate' | 'validated' | 'rejected' | 'manual';
   validation?: JointValidationResult;
+  coupling?: {
+    driverJointId: string;
+    multiplier: number;
+    offset: number;
+  };
+};
+
+export type KinematicLogicalControl = {
+  id: string;
+  name: string;
+  jointMappings: Array<{
+    jointId: string;
+    multiplier: number;
+    offset: number;
+  }>;
 };
 
 export type KinematicGraph = {
   parts: MechanicalPart[];
   joints: KinematicJoint[];
   rootPartId: string;
+  logicalControls?: KinematicLogicalControl[];
+};
+
+export type KinematicState = {
+  jointValues: Record<string, number>;
+  homeJointValues: Record<string, number>;
 };

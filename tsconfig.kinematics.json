@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".tmp/kinematics-tests",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src/domain/kinematics/**/*.ts",
+    "src/domain/model.ts",
+    "src/application/kinematics/**/*.ts"
+  ]
+}

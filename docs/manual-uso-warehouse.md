@@ -6,6 +6,8 @@ Este manual describe el flujo operativo para importar un modelo completo, desman
 
 El objetivo es comprobar que las piezas no se quedan solo como datos temporales de la pantalla. Cada pieza guardada permanentemente debe convertirse en un objeto 3D fisico dentro del proyecto, en formato `.glb`, y debe poder volver a importarse al escenario despues de refrescar la pagina.
 
+Desde la fase mecanica funcional, una pieza guardada tambien puede contener `FunctionalComponent`: interfaces mecanicas, propiedades funcionales, origen, transformacion y subgrafo `KinematicGraph`. Un conjunto guardado puede contener `FunctionalAssembly` con componentes, conexiones, joints, limites y validacion.
+
 ## Flujo Principal Verificado
 
 1. Abrir la plataforma en el navegador.
@@ -57,6 +59,66 @@ El objetivo es comprobar que las piezas no se quedan solo como datos temporales 
 - `Store Assembly`: guarda el conjunto actual de piezas del escenario como una entidad compuesta.
 - `Delete selected object permanently`: borra el objeto seleccionado del workspace y, si tiene fichero asociado, tambien lo elimina del warehouse fisico.
 - `Delete`: en el dashboard del warehouse borra la pieza seleccionada del manifest y del fichero local asociado.
+
+## Informacion Funcional Guardada
+
+Cada pieza desmontada o guardada desde workspace conserva:
+
+- `FunctionalComponent`;
+- interfaces mecanicas compatibles;
+- propiedades mecanicas inferidas;
+- transformacion local y origen;
+- subgrafo cinematico basado en `KinematicGraph` cuando existe informacion original.
+
+Cada assembly guardado conserva:
+
+- `FunctionalAssembly`;
+- componentes funcionales;
+- conexiones sugeridas entre interfaces compatibles;
+- joints y limites;
+- grafo cinematico reconstruido;
+- estado de validacion.
+
+El dashboard muestra un resumen corto como `interfaces`, `components` y `joints` para distinguir piezas funcionales de geometria muda.
+
+## Kinematic Authoring M1
+
+Cuando una pieza o modelo importado tiene articulaciones ausentes o incorrectas, usar el inspector `Kinematic Authoring`:
+
+1. Seleccionar el modelo importado.
+2. Cambiar a modo `Parts`.
+3. Seleccionar dos piezas con clic y `Shift` si se quiere crear una relacion nueva.
+4. Pulsar `Create Joint`.
+5. Definir `Parent`, `Child`, `Type`, `Axis`, `Origin` y limites.
+6. Usar `Pick Origin` para seleccionar el pivot fisico directamente sobre el modelo.
+7. Usar `Axis Gizmo` para orientar visualmente el eje.
+8. Usar `Axis A` y `Axis B` para calcular un eje arbitrario con `normalize(B-A)`.
+9. Si una pieza debe copiar otro movimiento, elegir `Mimic`, `Multiplier` y `Offset`.
+10. Probar el movimiento con el slider `Test`.
+11. Pulsar `Accept` si el joint es correcto o `Reject` si solo era una hipotesis.
+12. Pulsar `Home` para volver a la configuracion cero.
+13. Guardar el proyecto para persistir `kinematicGraph` y `kinematicState`.
+
+Reglas importantes:
+
+- `kinematicGraph` guarda la definicion mecanica.
+- `kinematicState` guarda solo la pose actual de prueba.
+- El slider no debe reimportar ni reconstruir la geometria.
+- El eje puede ser arbitrario, no solo X/Y/Z.
+- El origen del joint puede editarse numericamente para que el giro ocurra sobre el frame fisico correcto.
+- Los helpers de pivot, frame y eje son visuales y no modifican la geometria original.
+- Un gripper puede modelarse con dos joints acoplados usando multiplicadores opuestos.
+- La validacion avisa de ejes invalidos, limites rotos, ciclos, duplicados, referencias inexistentes y piezas huerfanas.
+
+## Persistencia Cinematica Y Asset Pesado
+
+Para cerrar M1 se diferencia:
+
+- La definicion mecanica se guarda como `kinematicGraph`.
+- La pose/home se guarda como `kinematicState`.
+- El asset pesado debe persistirse o referenciarse por el mecanismo de proyecto/Warehouse, no duplicarse necesariamente en `localStorage`.
+
+Si el modelo es grande, la recuperacion correcta de M1 consiste en restaurar exactamente joints, origins, axes, parent/child, limits, mimic y estado, y resolver la geometria desde el storage persistente disponible.
 
 ## Donde Se Guardan Los Objetos
 

@@ -298,6 +298,9 @@ try {
       if (!String(entry.thumbnailDataUrl ?? '').startsWith('data:image/')) {
         throw new Error(`${model.name} physical warehouse item did not persist a real thumbnail in manifest: ${entry.fileName}.`);
       }
+      if (!entry.functionalComponent || !Array.isArray(entry.functionalComponent.interfaces) || !entry.functionalComponent.kinematicGraph) {
+        throw new Error(`${model.name} physical warehouse item did not persist functional component metadata: ${entry.fileName}.`);
+      }
     }
     const savedLedgerItems = await page.locator('.warehouse-storage-ledger span').count();
     if (savedLedgerItems !== physicalWarehouseItems) {
@@ -436,11 +439,21 @@ try {
     }
 
     await page.locator('button[title="Save scene imported parts as composite assembly"]').click();
-    await page.waitForFunction(() => document.body.innerText.includes('Scene assembly stored'), undefined, { timeout: 240000 });
+    await page.waitForFunction(() => document.body.innerText.includes('Functional assembly saved'), undefined, { timeout: 240000 });
     await page.waitForTimeout(500);
     bodyText = await page.locator('body').textContent();
-    if (!bodyText?.includes('Scene assembly stored') || !bodyText?.includes('Assemblies')) {
+    if (!bodyText?.includes('Functional assembly saved')) {
       throw new Error(`${model.name} did not store the current scene as a composite assembly.`);
+    }
+    const manifestAfterFunctionalAssembly = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const savedFunctionalAssembly = manifestAfterFunctionalAssembly.items.find((entry) => entry.itemType === 'assembly' && entry.functionalAssembly);
+    if (
+      !savedFunctionalAssembly ||
+      !Array.isArray(savedFunctionalAssembly.functionalAssembly.components) ||
+      savedFunctionalAssembly.functionalAssembly.components.length < 2 ||
+      !Array.isArray(savedFunctionalAssembly.functionalAssembly.connections)
+    ) {
+      throw new Error(`${model.name} did not persist a functional assembly with components and kinematic connections.`);
     }
 
     const beforeDeleteBins = await page.locator('.warehouse-bin').count();

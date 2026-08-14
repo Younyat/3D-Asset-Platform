@@ -13,6 +13,7 @@ import {
   Transform,
   ValidatedJointMotion,
 } from '../../domain/model';
+import { evaluateForwardKinematics } from '../../application/kinematics/kinematicAuthoring';
 import { createRenderableSceneAsync } from '../../infrastructure/threeSceneFactory';
 
 export type ViewportStats = {
@@ -30,12 +31,15 @@ type ThreeViewportProps = {
   tool: EditorTool;
   partEditMode: PartEditMode;
   snapEnabled: boolean;
+  kinematicEditTarget?: KinematicEditTarget;
   motionDemoNodeId?: string;
   motionTrainingPreview?: MotionTrainingPreview;
   onSelect: (nodeId?: string) => void;
   onTransformCommit: (nodeId: string, transform: Transform) => void;
   onImportedPartTransformsCommit: (updates: Array<{ nodeId: string; objectName: string; transform: Transform }>) => void;
   onJointPoseChange: (nodeId: string, jointName: string, value: number) => void;
+  onKinematicPointPick: (event: KinematicPointPickEvent) => void;
+  onKinematicAxisChange: (event: KinematicAxisChangeEvent) => void;
   onPartSelectionChange: (selection: ImportedPartSelection[]) => void;
   onNodeContextMenu?: (event: { nodeId: string; x: number; y: number }) => void;
   onStatsChange: (stats: ViewportStats) => void;
@@ -54,6 +58,31 @@ export type MotionTrainingPreview = {
   min: number;
   max: number;
   amplitude: number;
+};
+
+export type KinematicEditMode = 'pick-origin' | 'pick-axis-a' | 'pick-axis-b' | 'axis-gizmo';
+
+export type KinematicEditTarget = {
+  nodeId: string;
+  jointId: string;
+  mode: KinematicEditMode;
+  origin: [number, number, number];
+  axis: [number, number, number];
+  axisPointA?: [number, number, number];
+};
+
+export type KinematicPointPickEvent = {
+  nodeId: string;
+  jointId: string;
+  mode: Extract<KinematicEditMode, 'pick-origin' | 'pick-axis-a' | 'pick-axis-b'>;
+  point: [number, number, number];
+  objectName?: string;
+};
+
+export type KinematicAxisChangeEvent = {
+  nodeId: string;
+  jointId: string;
+  axis: [number, number, number];
 };
 
 const toTransform = (object: THREE.Object3D): Transform => ({
@@ -99,6 +128,13 @@ const activeJointValue = (joint: ImportedJointPose) => {
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const normalizeTuple = (value: [number, number, number]): [number, number, number] => {
+  const length = Math.hypot(value[0], value[1], value[2]);
+  return length > 0.000001 ? [value[0] / length, value[1] / length, value[2] / length] : [1, 0, 0];
+};
+
+const vectorTuple = (vector: THREE.Vector3): [number, number, number] => [vector.x, vector.y, vector.z];
 
 const logicalMotionValue = (joint: ImportedJointPose, index: number, elapsed: number) => {
   const name = joint.name.toLowerCase();
@@ -168,6 +204,7 @@ const applyLogicalJointPose = (child: THREE.Object3D, joint: ImportedJointPose, 
 const applyDocumentJointPoses = (assetRoot: THREE.Group, document: AssetDocument) => {
   document.nodes.forEach((node) => {
     if (node.geometry.kind !== 'imported-model') return;
+    if (node.geometry.kinematicState && node.geometry.kinematicGraph) return;
     const poseByName = new Map(node.geometry.joints.map((joint) => [joint.name, joint]));
     const freePartNames = new Set((node.geometry.freePartTransforms ?? []).map((partTransform) => partTransform.objectName));
     assetRoot.traverse((child) => {
@@ -175,6 +212,61 @@ const applyDocumentJointPoses = (assetRoot: THREE.Group, document: AssetDocument
       if (child.userData.freeDragging || freePartNames.has(child.name)) return;
       const joint = poseByName.get(child.name);
       if (joint) applyLogicalJointPose(child, joint);
+    });
+  });
+};
+
+const matrixFromEvaluatedPose = (values: number[]) => {
+  const matrix = new THREE.Matrix4();
+  matrix.set(
+    values[0],
+    values[1],
+    values[2],
+    values[3],
+    values[4],
+    values[5],
+    values[6],
+    values[7],
+    values[8],
+    values[9],
+    values[10],
+    values[11],
+    values[12],
+    values[13],
+    values[14],
+    values[15],
+  );
+  return matrix;
+};
+
+const applyKinematicGraphState = (assetRoot: THREE.Group, document: AssetDocument) => {
+  const assetRootInverse = assetRoot.matrixWorld.clone().invert();
+  document.nodes.forEach((node) => {
+    if (node.geometry.kind !== 'imported-model' || !node.geometry.kinematicGraph || !node.geometry.kinematicState) return;
+    const poses = evaluateForwardKinematics(node.geometry.kinematicGraph, node.geometry.kinematicState);
+    const partsByObjectName = new Map<string, string>();
+    node.geometry.kinematicGraph.parts.forEach((part) => {
+      part.meshObjectIds.forEach((objectName) => partsByObjectName.set(objectName, part.id));
+    });
+
+    assetRoot.traverse((child) => {
+      if (child.userData.nodeId !== node.id || !child.name || child.userData.freeDragging) return;
+      const partId = partsByObjectName.get(child.name);
+      if (!partId) return;
+      const pose = poses[partId];
+      if (!pose) return;
+
+      child.updateMatrixWorld(true);
+      if (!child.userData.kinematicRestAssetMatrix) {
+        child.userData.kinematicRestAssetMatrix = assetRootInverse.clone().multiply(child.matrixWorld);
+      }
+
+      const restAssetMatrix = child.userData.kinematicRestAssetMatrix as THREE.Matrix4;
+      const nextAssetMatrix = matrixFromEvaluatedPose(pose.matrix).multiply(restAssetMatrix);
+      const parentAssetMatrix = child.parent ? assetRootInverse.clone().multiply(child.parent.matrixWorld) : new THREE.Matrix4();
+      const nextLocalMatrix = parentAssetMatrix.clone().invert().multiply(nextAssetMatrix);
+      nextLocalMatrix.decompose(child.position, child.quaternion, child.scale);
+      child.updateMatrixWorld(true);
     });
   });
 };
@@ -188,6 +280,7 @@ const applyRuntimeMotionDemo = (
 ) => {
   document.nodes.forEach((node) => {
     if (node.geometry.kind !== 'imported-model') return;
+    if (node.geometry.kinematicState && node.geometry.kinematicGraph) return;
     const poseByName = new Map(node.geometry.joints.map((joint, index) => [joint.name, { joint, index }]));
     const freePartNames = new Set((node.geometry.freePartTransforms ?? []).map((partTransform) => partTransform.objectName));
     const active = node.id === motionDemoNodeId;
@@ -299,12 +392,15 @@ export const ThreeViewport = ({
   tool,
   partEditMode,
   snapEnabled,
+  kinematicEditTarget,
   motionDemoNodeId,
   motionTrainingPreview,
   onSelect,
   onTransformCommit,
   onImportedPartTransformsCommit,
   onJointPoseChange,
+  onKinematicPointPick,
+  onKinematicAxisChange,
   onPartSelectionChange,
   onNodeContextMenu,
   onStatsChange,
@@ -314,12 +410,15 @@ export const ThreeViewport = ({
   const documentRef = useRef(document);
   const toolRef = useRef(tool);
   const partEditModeRef = useRef(partEditMode);
+  const kinematicEditTargetRef = useRef(kinematicEditTarget);
   const motionDemoNodeIdRef = useRef(motionDemoNodeId);
   const motionTrainingPreviewRef = useRef(motionTrainingPreview);
   const onSelectRef = useRef(onSelect);
   const onTransformCommitRef = useRef(onTransformCommit);
   const onImportedPartTransformsCommitRef = useRef(onImportedPartTransformsCommit);
   const onJointPoseChangeRef = useRef(onJointPoseChange);
+  const onKinematicPointPickRef = useRef(onKinematicPointPick);
+  const onKinematicAxisChangeRef = useRef(onKinematicAxisChange);
   const onPartSelectionChangeRef = useRef(onPartSelectionChange);
   const onNodeContextMenuRef = useRef(onNodeContextMenu);
   const onStatsChangeRef = useRef(onStatsChange);
@@ -351,6 +450,13 @@ export const ThreeViewport = ({
       startWorldPosition: THREE.Vector3;
     }>;
   }>();
+  const axisGizmoDragRef = useRef<{
+    pointerId: number;
+    plane: THREE.Plane;
+    origin: THREE.Vector3;
+    nodeId: string;
+    jointId: string;
+  }>();
   const selectedPartKeysRef = useRef<Set<string>>(new Set());
   const runtimeRef = useRef<{
     renderer: THREE.WebGLRenderer;
@@ -364,6 +470,8 @@ export const ThreeViewport = ({
     selectionBox: THREE.BoxHelper;
     selectedPartBoxes: THREE.BoxHelper[];
     partTransformGroup: THREE.Group;
+    kinematicHelperGroup: THREE.Group;
+    kinematicAxisHandle: THREE.Mesh;
     partTransformItems: Array<{
       nodeId: string;
       objectName: string;
@@ -383,19 +491,32 @@ export const ThreeViewport = ({
     documentRef.current = document;
     toolRef.current = tool;
     partEditModeRef.current = partEditMode;
+    kinematicEditTargetRef.current = kinematicEditTarget;
     motionDemoNodeIdRef.current = motionDemoNodeId;
     motionTrainingPreviewRef.current = motionTrainingPreview;
-  }, [document, tool, partEditMode, motionDemoNodeId, motionTrainingPreview]);
+  }, [document, tool, partEditMode, kinematicEditTarget, motionDemoNodeId, motionTrainingPreview]);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
     onTransformCommitRef.current = onTransformCommit;
     onImportedPartTransformsCommitRef.current = onImportedPartTransformsCommit;
     onJointPoseChangeRef.current = onJointPoseChange;
+    onKinematicPointPickRef.current = onKinematicPointPick;
+    onKinematicAxisChangeRef.current = onKinematicAxisChange;
     onPartSelectionChangeRef.current = onPartSelectionChange;
     onNodeContextMenuRef.current = onNodeContextMenu;
     onStatsChangeRef.current = onStatsChange;
-  }, [onSelect, onTransformCommit, onImportedPartTransformsCommit, onJointPoseChange, onPartSelectionChange, onNodeContextMenu, onStatsChange]);
+  }, [
+    onSelect,
+    onTransformCommit,
+    onImportedPartTransformsCommit,
+    onJointPoseChange,
+    onKinematicPointPick,
+    onKinematicAxisChange,
+    onPartSelectionChange,
+    onNodeContextMenu,
+    onStatsChange,
+  ]);
 
   useEffect(() => {
     if (!hostRef.current || runtimeRef.current) return;
@@ -430,6 +551,17 @@ export const ThreeViewport = ({
     const partTransformGroup = new THREE.Group();
     partTransformGroup.name = 'Selected Parts Transform';
     scene.add(partTransformGroup);
+    const kinematicHelperGroup = new THREE.Group();
+    kinematicHelperGroup.name = 'Kinematic Authoring Helpers';
+    scene.add(kinematicHelperGroup);
+    const kinematicAxisHandle = new THREE.Mesh(
+      new THREE.SphereGeometry(0.08, 16, 12),
+      new THREE.MeshBasicMaterial({ color: '#ffd23f', depthTest: false }),
+    );
+    kinematicAxisHandle.name = 'Kinematic Axis Handle';
+    kinematicAxisHandle.renderOrder = 20;
+    kinematicAxisHandle.visible = false;
+    scene.add(kinematicAxisHandle);
     const selectionBox = new THREE.BoxHelper(new THREE.Object3D(), '#30d6c8');
     selectionBox.visible = false;
     scene.add(selectionBox);
@@ -512,6 +644,62 @@ export const ThreeViewport = ({
     const findNodeObject = (nodeId: string | undefined) => (nodeId ? assetRoot.children.find((child) => child.userData.nodeId === nodeId) : undefined);
 
     const partKey = (nodeId: string, objectName: string) => `${nodeId}::${objectName}`;
+
+    const assetPointFromWorld = (worldPoint: THREE.Vector3) => assetRoot.worldToLocal(worldPoint.clone());
+
+    const clearKinematicHelpers = () => {
+      kinematicHelperGroup.children.forEach((child) => {
+        if ((child as THREE.ArrowHelper).line) {
+          const arrow = child as THREE.ArrowHelper;
+          arrow.line.geometry.dispose();
+          arrow.cone.geometry.dispose();
+          disposeHelperMaterial(arrow.line.material);
+          disposeHelperMaterial(arrow.cone.material);
+        } else {
+          const mesh = child as THREE.Mesh;
+          mesh.geometry?.dispose();
+          if (mesh.material) disposeHelperMaterial(mesh.material);
+        }
+      });
+      kinematicHelperGroup.clear();
+      kinematicAxisHandle.visible = false;
+    };
+
+    const addMarker = (position: THREE.Vector3, color: string, radius = 0.055) => {
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 12), new THREE.MeshBasicMaterial({ color, depthTest: false }));
+      marker.position.copy(position);
+      marker.renderOrder = 18;
+      kinematicHelperGroup.add(marker);
+      return marker;
+    };
+
+    const addArrow = (origin: THREE.Vector3, direction: THREE.Vector3, color: string | number, length = 0.7) => {
+      const safeDirection = direction.lengthSq() > 0.000001 ? direction.clone().normalize() : new THREE.Vector3(1, 0, 0);
+      const arrow = new THREE.ArrowHelper(safeDirection, origin, length, color, 0.13, 0.07);
+      arrow.renderOrder = 18;
+      arrow.line.renderOrder = 18;
+      arrow.cone.renderOrder = 18;
+      kinematicHelperGroup.add(arrow);
+      return arrow;
+    };
+
+    const syncKinematicHelpers = () => {
+      clearKinematicHelpers();
+      const target = kinematicEditTargetRef.current;
+      if (!target) return;
+      const origin = new THREE.Vector3(...target.origin);
+      const axis = new THREE.Vector3(...normalizeTuple(target.axis));
+      addMarker(origin, '#ff4d6d', 0.07);
+      addArrow(origin, new THREE.Vector3(1, 0, 0), '#ef4444', 0.42);
+      addArrow(origin, new THREE.Vector3(0, 1, 0), '#22c55e', 0.42);
+      addArrow(origin, new THREE.Vector3(0, 0, 1), '#3b82f6', 0.42);
+      addArrow(origin, axis, '#ffd23f', 0.9);
+      if (target.axisPointA) addMarker(new THREE.Vector3(...target.axisPointA), '#7dd3fc', 0.055);
+      if (target.mode === 'axis-gizmo') {
+        kinematicAxisHandle.position.copy(origin.clone().add(axis.multiplyScalar(0.95)));
+        kinematicAxisHandle.visible = true;
+      }
+    };
 
     const findFreeDragTarget = (hit: THREE.Object3D | undefined, nodeId: string | undefined) => {
       if (!hit || !nodeId) return undefined;
@@ -746,12 +934,49 @@ export const ThreeViewport = ({
 
       updatePointer(event);
       raycaster.setFromCamera(pointer, camera);
+      const activeKinematicEdit = kinematicEditTargetRef.current;
+      if (activeKinematicEdit?.mode === 'axis-gizmo') {
+        const handleHit = kinematicAxisHandle.visible ? raycaster.intersectObject(kinematicAxisHandle, false)[0] : undefined;
+        if (handleHit) {
+          const origin = new THREE.Vector3(...activeKinematicEdit.origin);
+          const cameraDirection = new THREE.Vector3();
+          camera.getWorldDirection(cameraDirection);
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(cameraDirection, origin);
+          axisGizmoDragRef.current = {
+            pointerId: event.pointerId,
+            plane,
+            origin,
+            nodeId: activeKinematicEdit.nodeId,
+            jointId: activeKinematicEdit.jointId,
+          };
+          orbit.enabled = false;
+          renderer.domElement.setPointerCapture(event.pointerId);
+          event.preventDefault();
+          return;
+        }
+      }
       const hits = raycaster.intersectObjects([...assetRoot.children, ...partTransformGroup.children], true);
       const firstHit = hits[0];
       const hit = firstHit?.object;
       const nodeId = hit?.userData.nodeId as string | undefined;
       const freeDragTarget = findFreeDragTarget(hit, nodeId);
       const currentTool = toolRef.current;
+      if (
+        activeKinematicEdit &&
+        firstHit?.point &&
+        (activeKinematicEdit.mode === 'pick-origin' || activeKinematicEdit.mode === 'pick-axis-a' || activeKinematicEdit.mode === 'pick-axis-b')
+      ) {
+        onSelectRef.current(activeKinematicEdit.nodeId);
+        onKinematicPointPickRef.current({
+          nodeId: activeKinematicEdit.nodeId,
+          jointId: activeKinematicEdit.jointId,
+          mode: activeKinematicEdit.mode,
+          point: vectorTuple(assetPointFromWorld(firstHit.point)),
+          objectName: hit?.name,
+        });
+        event.preventDefault();
+        return;
+      }
       const pickedJoint = currentTool === 'select' ? findPickedJoint(hit, firstHit?.point) : undefined;
 
       if (pickedJoint) {
@@ -839,6 +1064,25 @@ export const ThreeViewport = ({
     };
 
     const onPointerMove = (event: PointerEvent) => {
+      const activeAxisGizmoDrag = axisGizmoDragRef.current;
+      if (activeAxisGizmoDrag && activeAxisGizmoDrag.pointerId === event.pointerId) {
+        const cursorPoint = cursorPlanePoint(event, activeAxisGizmoDrag.plane);
+        if (cursorPoint) {
+          const axis = cursorPoint.clone().sub(activeAxisGizmoDrag.origin);
+          if (axis.lengthSq() > 0.000001) {
+            const normalized = vectorTuple(axis.normalize());
+            kinematicAxisHandle.position.copy(activeAxisGizmoDrag.origin.clone().add(axis.multiplyScalar(0.95)));
+            onKinematicAxisChangeRef.current({
+              nodeId: activeAxisGizmoDrag.nodeId,
+              jointId: activeAxisGizmoDrag.jointId,
+              axis: normalized,
+            });
+          }
+        }
+        event.preventDefault();
+        return;
+      }
+
       const activeDrag = jointDragRef.current;
       const activeObjectDrag = objectDragRef.current;
       if (activeObjectDrag && activeObjectDrag.pointerId === event.pointerId) {
@@ -881,6 +1125,17 @@ export const ThreeViewport = ({
     };
 
     const finishJointDrag = (event: PointerEvent) => {
+      const activeAxisGizmoDrag = axisGizmoDragRef.current;
+      if (activeAxisGizmoDrag && activeAxisGizmoDrag.pointerId === event.pointerId) {
+        axisGizmoDragRef.current = undefined;
+        orbit.enabled = true;
+        if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+          renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+        event.preventDefault();
+        return;
+      }
+
       const activeObjectDrag = objectDragRef.current;
       if (activeObjectDrag && activeObjectDrag.pointerId === event.pointerId) {
         activeObjectDrag.items.forEach((item) => {
@@ -954,6 +1209,8 @@ export const ThreeViewport = ({
 
       orbit.update();
       applyRuntimeMotionDemo(assetRoot, documentRef.current, motionDemoNodeIdRef.current, motionTrainingPreviewRef.current, time / 1000);
+      applyKinematicGraphState(assetRoot, documentRef.current);
+      syncKinematicHelpers();
       if (selectionBox.visible) selectionBox.update();
       selectedPartBoxes.forEach((box) => box.update());
       renderer.render(scene, camera);
@@ -986,6 +1243,8 @@ export const ThreeViewport = ({
       selectionBox,
       selectedPartBoxes,
       partTransformGroup,
+      kinematicHelperGroup,
+      kinematicAxisHandle,
       partTransformItems: [],
       animationId: requestAnimationFrame(animate),
       lastFrame: performance.now(),
@@ -1007,6 +1266,9 @@ export const ThreeViewport = ({
       window.removeEventListener('pointercancel', finishJointDrag);
       clearPartTransformGroup();
       clearSelectedPartBoxes();
+      clearKinematicHelpers();
+      kinematicAxisHandle.geometry.dispose();
+      disposeHelperMaterial(kinematicAxisHandle.material);
       cancelAnimationFrame(runtimeRef.current?.animationId ?? 0);
       transform.dispose();
       orbit.dispose();
@@ -1132,6 +1394,7 @@ export const ThreeViewport = ({
 
     if (renderStructureSignatureRef.current === nextSignature) {
       applyDocumentJointPoses(runtime.assetRoot, document);
+      applyKinematicGraphState(runtime.assetRoot, document);
       syncViewportControls();
       if (runtime.selectionBox.visible) runtime.selectionBox.update();
       const nextStats = {
@@ -1155,6 +1418,9 @@ export const ThreeViewport = ({
       clearBoxHelpers(runtime.scene, runtime.selectedPartBoxes);
       runtime.assetRoot.clear();
       runtime.assetRoot.add(...renderable.children);
+      runtime.assetRoot.traverse((child) => {
+        delete child.userData.kinematicRestAssetMatrix;
+      });
       renderRuntimeSelectedPartBoxes();
       syncViewportControls();
 
@@ -1172,7 +1438,7 @@ export const ThreeViewport = ({
     return () => {
       disposed = true;
     };
-  }, [document, tool, snapEnabled, partEditMode]);
+  }, [document, tool, snapEnabled, partEditMode, kinematicEditTarget]);
 
   const memoryLabel =
     liveStats.memoryUsedMb !== undefined

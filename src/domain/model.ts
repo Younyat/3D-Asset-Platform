@@ -1,4 +1,5 @@
-import type { KinematicGraph } from './kinematics';
+import type { KinematicGraph, KinematicState } from './kinematics';
+import type { FunctionalAssembly, FunctionalComponent } from './mechanics';
 
 export type NodeId = string;
 
@@ -105,6 +106,7 @@ export type ImportedModelGeometry = {
   isolatedObjectNames?: string[];
   partObjectNames?: string[];
   kinematicGraph?: KinematicGraph;
+  kinematicState?: KinematicState;
 };
 
 export type SerializedObjectGeometry = {
@@ -149,6 +151,7 @@ export type PartWarehousePartItem = {
   objectName: string;
   geometry: ImportedModelGeometry | SerializedObjectGeometry;
   material: MaterialDefinition;
+  functionalComponent?: FunctionalComponent;
   metadata: {
     sourceFormat: ImportedModelGeometry['sourceFormat'] | 'serialized-object';
     originalBounds: Vector3Tuple;
@@ -171,6 +174,7 @@ export type PartWarehouseAssemblyItem = {
   sourceNodeId?: NodeId;
   sourceAssetName: string;
   assemblyNodes: SceneNode[];
+  functionalAssembly?: FunctionalAssembly;
   metadata: {
     sourceFormat: 'assembly';
     originalBounds: Vector3Tuple;

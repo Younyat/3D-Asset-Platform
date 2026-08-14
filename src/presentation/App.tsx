@@ -64,6 +64,20 @@ import {
   ValidationIssue,
 } from '../domain/model';
 import type { KinematicGraph } from '../domain/kinematics';
+import type { KinematicJoint, MechanicalPart } from '../domain/kinematics';
+import type { FunctionalComponent } from '../domain/mechanics';
+import {
+  acceptJointCandidate,
+  createHomeKinematicState,
+  createJoint,
+  rejectJointCandidate,
+  removeJoint,
+  resetKinematicState,
+  normalizeAxis,
+  setJointValue,
+  updateJoint,
+  validateKinematicGraph,
+} from '../application/kinematics/kinematicAuthoring';
 import {
   isDesktopRuntime,
   openProjectNative,
@@ -92,7 +106,16 @@ import {
   warehouseItemKey,
 } from '../infrastructure/warehouseRepository';
 import { createIndependentWarehousePartGeometry } from '../infrastructure/warehouseParts';
-import { ImportedPartSelection, MotionTrainingPreview, ThreeViewport, ViewportStats } from './components/ThreeViewport';
+import {
+  ImportedPartSelection,
+  KinematicAxisChangeEvent,
+  KinematicEditTarget,
+  KinematicPointPickEvent,
+  MotionTrainingPreview,
+  ThreeViewport,
+  ViewportStats,
+} from './components/ThreeViewport';
+import { buildFunctionalAssembly, buildFunctionalComponent } from '../application/mechanics/functionalModel';
 
 const makeStarterProject = () => {
   const project = createEmptyProject('Prototype Asset');
@@ -372,6 +395,24 @@ const sceneAssemblyBounds = (nodes: SceneNode[]): [number, number, number] => {
   );
 };
 
+const functionalComponentId = (sourceAssetName: string, objectName: string) =>
+  `component_${sourceAssetName}_${objectName}`.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 72);
+
+const instantiateFunctionalComponent = (component: FunctionalComponent, instanceId: string, transform: Transform): FunctionalComponent => ({
+  ...component,
+  id: instanceId,
+  localTransform: transform,
+  interfaces: component.interfaces.map((mechanicalInterface) => ({
+    ...mechanicalInterface,
+    id: `${mechanicalInterface.id}_${instanceId}`.slice(0, 96),
+    componentId: instanceId,
+  })),
+  metadata: {
+    ...component.metadata,
+    sourceFunctionalComponentId: component.id,
+  },
+});
+
 const mergeWarehouseItems = (currentItems: PartWarehouseItem[] = [], incomingItems: PartWarehouseItem[] = []) => {
   const indexByKey = new Map(currentItems.map((item, index) => [warehouseItemKey(item), index]));
   const merged = [...currentItems];
@@ -389,6 +430,16 @@ const mergeWarehouseItems = (currentItems: PartWarehouseItem[] = [], incomingIte
 };
 
 const formatGigabytes = (bytes: number) => `${(bytes / 1024 / 1024 / 1024).toFixed(3)} GB`;
+
+const functionalWarehouseSummary = (item: PartWarehouseItem) => {
+  if (item.itemType === 'assembly' && item.functionalAssembly) {
+    return `${item.functionalAssembly.components.length} components | ${item.functionalAssembly.connections.length} joints`;
+  }
+  if (item.itemType === 'part' && item.functionalComponent) {
+    return `${item.functionalComponent.interfaces.length} interfaces | ${item.functionalComponent.mechanicalProperties.role}`;
+  }
+  return item.itemType === 'assembly' ? `${item.assemblyNodes.length} parts` : item.metadata.sourceFormat.toUpperCase();
+};
 
 const blobToDataUrl = (blob: Blob) =>
   new Promise<string>((resolve, reject) => {
@@ -421,6 +472,7 @@ export const App = () => {
   const [nativeProjectPath, setNativeProjectPath] = useState<string | undefined>();
   const [demoMotionNodeId, setDemoMotionNodeId] = useState<string | undefined>();
   const [motionTrainer, setMotionTrainer] = useState<MotionTrainerState | undefined>();
+  const [kinematicEditTarget, setKinematicEditTarget] = useState<KinematicEditTarget | undefined>();
   const [warehouseStorageInfo, setWarehouseStorageInfo] = useState<WarehouseStorageInfo>({ items: 0, usageBytes: 0, quotaBytes: 0, savedItems: [] });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const glbInputRef = useRef<HTMLInputElement | null>(null);
@@ -452,6 +504,18 @@ export const App = () => {
     () => (selectedNode ? selectedParts.filter((part) => part.nodeId === selectedNode.id) : []),
     [selectedNode, selectedParts],
   );
+  const activeKinematicEditTarget = useMemo<KinematicEditTarget | undefined>(() => {
+    if (!kinematicEditTarget) return undefined;
+    const node = document.nodes.find((item) => item.id === kinematicEditTarget.nodeId);
+    if (!node || node.geometry.kind !== 'imported-model') return undefined;
+    const joint = graphFromImportedGeometry(node.geometry).joints.find((item) => item.id === kinematicEditTarget.jointId);
+    if (!joint) return undefined;
+    return {
+      ...kinematicEditTarget,
+      origin: joint.origin.position,
+      axis: joint.axis,
+    };
+  }, [document.nodes, kinematicEditTarget]);
 
   const currentMotionCandidate = useMemo(() => {
     if (!motionTrainer) return undefined;
@@ -962,6 +1026,7 @@ export const App = () => {
     const className = inferPartClassName(objectName);
     const now = new Date().toISOString();
     const independentGeometry = await createIndependentWarehousePartGeometry(node.geometry, node.material, objectName);
+    const componentId = functionalComponentId(node.geometry.assetName, objectName);
     const item: PartWarehousePartItem = {
       id: `part_${crypto.randomUUID().slice(0, 8)}`,
       itemType: 'part',
@@ -974,6 +1039,17 @@ export const App = () => {
       objectName,
       geometry: independentGeometry,
       material: { ...node.material },
+      functionalComponent: buildFunctionalComponent({
+        id: componentId,
+        name: cleanPartToken(objectName),
+        category,
+        className,
+        sourceAssetName: node.geometry.assetName,
+        sourceObjectName: objectName,
+        bounds: independentGeometry.originalBounds,
+        material: { ...node.material },
+        sourceGraph: node.geometry.kinematicGraph,
+      }),
       metadata: {
         sourceFormat: independentGeometry.kind,
         originalBounds: independentGeometry.originalBounds,
@@ -1009,6 +1085,7 @@ export const App = () => {
     const category = inferPartCategory(node.name, node.name);
     const className = inferPartClassName(node.name);
     const now = new Date().toISOString();
+    const componentId = functionalComponentId(node.geometry.assetName, node.name);
     const item: PartWarehousePartItem = {
       id: `part_${crypto.randomUUID().slice(0, 8)}`,
       itemType: 'part',
@@ -1021,6 +1098,17 @@ export const App = () => {
       objectName: node.name,
       geometry: cloneGeometry(node.geometry),
       material: { ...node.material },
+      functionalComponent: buildFunctionalComponent({
+        id: componentId,
+        name: node.name,
+        category,
+        className,
+        sourceAssetName: node.geometry.assetName,
+        sourceObjectName: node.name,
+        bounds: node.geometry.originalBounds,
+        material: { ...node.material },
+        localTransform: node.transform,
+      }),
       metadata: {
         sourceFormat: 'serialized-object',
         originalBounds: node.geometry.originalBounds,
@@ -1505,9 +1593,77 @@ export const App = () => {
     );
   };
 
+  const buildFunctionalComponentFromSceneNode = async (node: SceneNode, index: number) => {
+    const instanceId = functionalComponentId(document.metadata.id, `${node.id}_${node.name}_${index}`);
+    const existingItem = warehouseItemForWorkspaceNode(node);
+    if (existingItem?.itemType === 'part' && existingItem.functionalComponent) {
+      return instantiateFunctionalComponent(
+        {
+          ...existingItem.functionalComponent,
+          metadata: {
+            ...existingItem.functionalComponent.metadata,
+            reusedFromWarehouseItemId: existingItem.id,
+          },
+        },
+        instanceId,
+        node.transform,
+      );
+    }
+
+    if (node.geometry.kind === 'serialized-object') {
+      return buildFunctionalComponent({
+        id: instanceId,
+        name: node.name,
+        category: inferPartCategory(node.name, node.name),
+        className: inferPartClassName(node.name),
+        sourceAssetName: node.geometry.assetName,
+        sourceObjectName: node.name,
+        bounds: node.geometry.normalizedBounds,
+        material: { ...node.material },
+        localTransform: node.transform,
+      });
+    }
+
+    if (node.geometry.kind === 'imported-model') {
+      return buildFunctionalComponent({
+        id: instanceId,
+        name: node.name,
+        category: inferPartCategory(node.geometry.assetName, node.name),
+        className: inferPartClassName(node.name),
+        sourceAssetName: node.geometry.assetName,
+        sourceObjectName: node.name,
+        bounds: node.geometry.normalizedBounds,
+        material: { ...node.material },
+        localTransform: node.transform,
+        sourceGraph: node.geometry.kinematicGraph,
+      });
+    }
+
+    return buildFunctionalComponent({
+      id: instanceId,
+      name: node.name,
+      category: inferPartCategory(document.metadata.name, node.name),
+      className: inferPartClassName(node.name),
+      sourceAssetName: document.metadata.name,
+      sourceObjectName: node.name,
+      bounds: [1, 1, 1],
+      material: { ...node.material },
+      localTransform: node.transform,
+    });
+  };
+
   const buildSceneAssemblyWarehouseItem = async (nodes: SceneNode[], name?: string, storageKey?: string): Promise<PartWarehouseAssemblyItem | undefined> => {
     if (!nodes.length) return undefined;
     const now = new Date().toISOString();
+    const components = await Promise.all(nodes.map((node, index) => buildFunctionalComponentFromSceneNode(node, index)));
+    const functionalAssembly = buildFunctionalAssembly({
+      id: `assembly_functional_${crypto.randomUUID().slice(0, 8)}`,
+      name:
+        name ??
+        `Scene Assembly ${String((document.partWarehouse ?? []).filter((entry) => entry.itemType === 'assembly').length + 1).padStart(2, '0')}`,
+      components,
+      source: 'reassembly',
+    });
     const item: PartWarehouseAssemblyItem = {
       id: `assembly_${crypto.randomUUID().slice(0, 8)}`,
       itemType: 'assembly' as const,
@@ -1519,6 +1675,7 @@ export const App = () => {
       className: 'Composite',
       sourceAssetName: document.metadata.name,
       assemblyNodes: nodes.map((node) => cloneStoredNode(node)),
+      functionalAssembly,
       metadata: {
         sourceFormat: 'assembly' as const,
         originalBounds: sceneAssemblyBounds(nodes),
@@ -1581,6 +1738,8 @@ export const App = () => {
       },
       'Scene assembly stored',
     );
+    await saveWarehouseItemsPermanent([item], 'functional assembly');
+    setStatus('Functional assembly saved');
   };
 
   const saveWorkspaceItemPermanent = async (nodeId: string) => {
@@ -2060,6 +2219,235 @@ export const App = () => {
     setStatus('Joint adjusted');
   };
 
+  const updateKinematicGraphForNode = (
+    nodeId: string,
+    updater: (graph: KinematicGraph, geometry: ImportedModelGeometry) => KinematicGraph,
+    nextStatus: string,
+  ) => {
+    setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
+    setDocument((current) => {
+      const nextDocument = touch({
+        ...current,
+        selectedNodeId: nodeId,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
+          const graph = updater(graphFromImportedGeometry(node.geometry), node.geometry);
+          const state = node.geometry.kinematicState ?? createHomeKinematicState(graph);
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              kinematicGraph: graph,
+              kinematicState: {
+                homeJointValues: { ...createHomeKinematicState(graph).homeJointValues, ...state.homeJointValues },
+                jointValues: { ...createHomeKinematicState(graph).jointValues, ...state.jointValues },
+              },
+            },
+          };
+        }),
+      });
+      setIssues(validateProject(nextDocument));
+      return nextDocument;
+    });
+    markWorkspaceNodesPending([nodeId]);
+    setStatus(nextStatus);
+  };
+
+  const setKinematicJointValueForNode = (nodeId: string, jointId: string, value: number) => {
+    setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
+    setDocument((current) =>
+      touch({
+        ...current,
+        selectedNodeId: nodeId,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
+          const graph = graphFromImportedGeometry(node.geometry);
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              kinematicGraph: graph,
+              kinematicState: setJointValue(graph, node.geometry.kinematicState, jointId, value),
+            },
+          };
+        }),
+      }),
+    );
+    setStatus('Joint test updated');
+  };
+
+  const resetKinematicPoseForNode = (nodeId: string) => {
+    setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
+    setDocument((current) =>
+      touch({
+        ...current,
+        selectedNodeId: nodeId,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
+          const graph = graphFromImportedGeometry(node.geometry);
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              kinematicGraph: graph,
+              kinematicState: resetKinematicState(graph, node.geometry.kinematicState),
+            },
+          };
+        }),
+      }),
+    );
+    markWorkspaceNodesPending([nodeId]);
+    setStatus('Kinematic pose reset');
+  };
+
+  const updateKinematicJointForNode = (nodeId: string, jointId: string, patch: Partial<KinematicJoint>) => {
+    updateKinematicGraphForNode(nodeId, (graph) => updateJoint(graph, jointId, patch), 'Kinematic joint updated');
+  };
+
+  const startKinematicEditForNode = (nodeId: string, jointId: string, mode: KinematicEditTarget['mode']) => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    if (!node || node.geometry.kind !== 'imported-model') return;
+    const joint = graphFromImportedGeometry(node.geometry).joints.find((item) => item.id === jointId);
+    if (!joint) return;
+    setTool('select');
+    setKinematicEditTarget({
+      nodeId,
+      jointId,
+      mode,
+      origin: joint.origin.position,
+      axis: joint.axis,
+      axisPointA: mode === 'pick-axis-b' ? kinematicEditTarget?.axisPointA : undefined,
+    });
+    setStatus(mode === 'pick-origin' ? 'Pick joint origin in viewport' : mode === 'axis-gizmo' ? 'Drag axis gizmo in viewport' : 'Pick axis point in viewport');
+  };
+
+  const handleKinematicPointPick = (event: KinematicPointPickEvent) => {
+    if (event.mode === 'pick-origin') {
+      updateKinematicGraphForNode(
+        event.nodeId,
+        (graph) =>
+          updateJoint(graph, event.jointId, {
+            origin: { position: event.point, rotation: [0, 0, 0, 1] },
+            evidence: [
+              ...(graph.joints.find((joint) => joint.id === event.jointId)?.evidence ?? []),
+              { type: 'manual', score: 1, message: `Joint origin picked on ${event.objectName ?? 'model surface'}.` },
+            ],
+          }),
+        'Joint origin picked',
+      );
+      setKinematicEditTarget(undefined);
+      return;
+    }
+
+    if (event.mode === 'pick-axis-a') {
+      setKinematicEditTarget((current) =>
+        current && current.nodeId === event.nodeId && current.jointId === event.jointId
+          ? { ...current, mode: 'pick-axis-b', axisPointA: event.point }
+          : undefined,
+      );
+      setStatus('Pick second axis point');
+      return;
+    }
+
+    const pointA = kinematicEditTarget?.axisPointA;
+    if (!pointA) {
+      setStatus('Pick first axis point before B');
+      return;
+    }
+    const axis = normalizeAxis([event.point[0] - pointA[0], event.point[1] - pointA[1], event.point[2] - pointA[2]]);
+    if (!axis) {
+      setStatus('Axis points are too close');
+      return;
+    }
+    updateKinematicGraphForNode(
+      event.nodeId,
+      (graph) =>
+        updateJoint(graph, event.jointId, {
+          axis,
+          evidence: [
+            ...(graph.joints.find((joint) => joint.id === event.jointId)?.evidence ?? []),
+            { type: 'manual', score: 1, message: 'Axis calculated from two picked points.' },
+          ],
+        }),
+      'Two-point axis applied',
+    );
+    setKinematicEditTarget(undefined);
+  };
+
+  const handleKinematicAxisChange = (event: KinematicAxisChangeEvent) => {
+    updateKinematicGraphForNode(
+      event.nodeId,
+      (graph) => updateJoint(graph, event.jointId, { axis: event.axis }),
+      'Axis gizmo adjusted',
+    );
+  };
+
+  const acceptKinematicJointForNode = (nodeId: string, jointId: string) => {
+    updateKinematicGraphForNode(nodeId, (graph) => acceptJointCandidate(graph, jointId), 'Kinematic joint accepted');
+  };
+
+  const rejectKinematicJointForNode = (nodeId: string, jointId: string) => {
+    updateKinematicGraphForNode(nodeId, (graph) => rejectJointCandidate(graph, jointId), 'Kinematic joint rejected');
+  };
+
+  const deleteKinematicJointForNode = (nodeId: string, jointId: string) => {
+    updateKinematicGraphForNode(nodeId, (graph) => removeJoint(graph, jointId), 'Kinematic joint deleted');
+  };
+
+  const createKinematicJointForNode = (nodeId: string, selectedObjectNames: string[]) => {
+    const cleanSelection = [...new Set(selectedObjectNames)].slice(0, 2);
+    updateKinematicGraphForNode(
+      nodeId,
+      (graph) => {
+        const nextParts = [...graph.parts];
+        const rootBounds = graph.parts.find((part) => part.id === graph.rootPartId)?.bounds;
+        const ensurePart = (objectName: string): MechanicalPart => {
+          const existing = nextParts.find((part) => part.meshObjectIds.includes(objectName));
+          if (existing) return existing;
+          const part: MechanicalPart = {
+            id: `part_manual_${objectName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}_${crypto.randomUUID().slice(0, 6)}`,
+            name: cleanPartToken(objectName),
+            meshObjectIds: [objectName],
+            localFrame: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            bounds:
+              rootBounds ?? {
+                min: [0, 0, 0],
+                max: [1, 1, 1],
+                size: [1, 1, 1],
+                center: [0, 0, 0],
+              },
+            static: false,
+            visible: true,
+            source: 'manual-group',
+            metadata: { objectName, authoringSource: 'selected-parts' },
+          };
+          nextParts.push(part);
+          return part;
+        };
+        const parent = cleanSelection[0] ? ensurePart(cleanSelection[0]) : graph.parts.find((part) => part.id === graph.rootPartId);
+        const child = cleanSelection[1] ? ensurePart(cleanSelection[1]) : nextParts.find((part) => part.id !== parent?.id && !part.static);
+        if (!parent || !child || parent.id === child.id) return { ...graph, parts: nextParts };
+        const jointId = `joint_manual_${crypto.randomUUID().slice(0, 8)}`;
+        const joint: KinematicJoint = {
+          id: jointId,
+          name: `Joint ${cleanPartToken(parent.name)} to ${cleanPartToken(child.name)}`,
+          parentPartId: parent.id,
+          childPartId: child.id,
+          type: 'revolute',
+          origin: { position: rootBounds?.center ?? [0, 0, 0], rotation: [0, 0, 0, 1] },
+          axis: [0, 0, 1],
+          limits: { lower: -Math.PI / 2, upper: Math.PI / 2 },
+          source: 'manual',
+          confidence: 1,
+          evidence: [{ type: 'manual', score: 1, message: 'Created in Kinematic Authoring from selected parts.' }],
+          status: 'candidate',
+        };
+        return createJoint({ ...graph, parts: nextParts }, joint);
+      },
+      'Kinematic joint candidate created',
+    );
+  };
+
   const resetImportedJointPose = () => {
     setDemoMotionNodeId(undefined);
     setMotionTrainer(undefined);
@@ -2085,6 +2473,7 @@ export const App = () => {
             })),
             freePartTransforms: [],
             partMaterials: [],
+            kinematicState: node.geometry.kinematicGraph ? resetKinematicState(node.geometry.kinematicGraph, node.geometry.kinematicState) : undefined,
           },
         };
       },
@@ -2328,7 +2717,7 @@ export const App = () => {
                 <button key={`workspace-${item.id}`} className="saved-object-item" title={`Import ${item.name}`} onClick={() => addWarehouseItemToScene(item)}>
                   {item.thumbnailDataUrl ? <img src={item.thumbnailDataUrl} alt="" /> : <Cuboid size={18} />}
                   <span>{item.name}</span>
-                  <small>{item.itemType === 'assembly' ? `${item.assemblyNodes.length} parts` : item.code}</small>
+                  <small>{functionalWarehouseSummary(item)}</small>
                 </button>
               ))}
               {!(document.partWarehouse?.length) && <div className="empty-state compact">No saved objects loaded.</div>}
@@ -2354,12 +2743,15 @@ export const App = () => {
           tool={tool}
           partEditMode={partEditMode}
           snapEnabled={snapEnabled}
+          kinematicEditTarget={activeKinematicEditTarget}
           motionDemoNodeId={demoMotionNodeId}
           motionTrainingPreview={motionTrainingPreview}
           onSelect={selectNode}
           onTransformCommit={updateNodeTransform}
           onImportedPartTransformsCommit={updateImportedPartTransforms}
           onJointPoseChange={setImportedJointMotionForNode}
+          onKinematicPointPick={handleKinematicPointPick}
+          onKinematicAxisChange={handleKinematicAxisChange}
           onPartSelectionChange={updatePartSelectionStatus}
           onNodeContextMenu={({ nodeId, x, y }) => setWorkspaceMenu({ nodeId, x, y })}
           onStatsChange={setStats}
@@ -2545,6 +2937,15 @@ export const App = () => {
                 stopMotionTrainer={stopMotionTrainer}
                 moveValidatedMotion={moveValidatedMotion}
                 removeValidatedMotion={removeValidatedMotion}
+                selectedPartNames={selectedPartsForSelectedNode.map((part) => part.objectName)}
+                setKinematicJointValue={setKinematicJointValueForNode}
+                resetKinematicPose={resetKinematicPoseForNode}
+                updateKinematicJoint={updateKinematicJointForNode}
+                startKinematicEdit={startKinematicEditForNode}
+                acceptKinematicJoint={acceptKinematicJointForNode}
+                rejectKinematicJoint={rejectKinematicJointForNode}
+                deleteKinematicJoint={deleteKinematicJointForNode}
+                createKinematicJoint={createKinematicJointForNode}
                 randomizeGenerator={randomizeGenerator}
               />
             </>
@@ -2730,7 +3131,7 @@ export const App = () => {
                             )}
                             <small>{item.code}</small>
                             <span>{item.name}</span>
-                            <em>{item.itemType === 'assembly' ? `${item.assemblyNodes.length} parts` : item.metadata.sourceFormat.toUpperCase()}</em>
+                            <em>{functionalWarehouseSummary(item)}</em>
                           </button>
                         ))}
                       </div>
@@ -2854,23 +3255,90 @@ const Slider = ({ label, value, min, max, step, onChange }: SliderProps) => (
 
 const formatVector = (values: number[] | undefined, digits = 3) => (values?.map((value) => Number(value).toFixed(digits)).join(', ') ?? 'n/a');
 
-const KinematicGraphPanel = ({ geometry }: { geometry: ImportedModelGeometry }) => {
+type KinematicGraphPanelProps = {
+  node: SceneNode;
+  selectedPartNames: string[];
+  setKinematicJointValue: (nodeId: string, jointId: string, value: number) => void;
+  resetKinematicPose: (nodeId: string) => void;
+  updateKinematicJoint: (nodeId: string, jointId: string, patch: Partial<KinematicJoint>) => void;
+  startKinematicEdit: (nodeId: string, jointId: string, mode: KinematicEditTarget['mode']) => void;
+  acceptKinematicJoint: (nodeId: string, jointId: string) => void;
+  rejectKinematicJoint: (nodeId: string, jointId: string) => void;
+  deleteKinematicJoint: (nodeId: string, jointId: string) => void;
+  createKinematicJoint: (nodeId: string, selectedPartNames: string[]) => void;
+};
+
+const KinematicGraphPanel = ({
+  node,
+  selectedPartNames,
+  setKinematicJointValue,
+  resetKinematicPose,
+  updateKinematicJoint,
+  startKinematicEdit,
+  acceptKinematicJoint,
+  rejectKinematicJoint,
+  deleteKinematicJoint,
+  createKinematicJoint,
+}: KinematicGraphPanelProps) => {
+  const geometry = node.geometry as ImportedModelGeometry;
   const graph = graphFromImportedGeometry(geometry);
   const partById = new Map(graph.parts.map((part) => [part.id, part]));
   const validatedCount = graph.joints.filter((joint) => joint.status === 'validated').length;
   const movableParts = graph.parts.filter((part) => !part.static).length;
+  const validationIssues = validateKinematicGraph(graph);
+  const issueByJoint = new Map<string, string[]>();
+  validationIssues.forEach((issue) => {
+    if (!issue.jointId) return;
+    issueByJoint.set(issue.jointId, [...(issueByJoint.get(issue.jointId) ?? []), issue.code]);
+  });
+  const state = geometry.kinematicState ?? createHomeKinematicState(graph);
+
+  const updateAxis = (joint: KinematicJoint, axis: [number, number, number]) => {
+    updateKinematicJoint(node.id, joint.id, { axis });
+  };
+
+  const updateOrigin = (joint: KinematicJoint, position: [number, number, number]) => {
+    updateKinematicJoint(node.id, joint.id, { origin: { ...joint.origin, position } });
+  };
+
+  const sliderRange = (joint: KinematicJoint) => {
+    if (joint.type === 'prismatic') return { min: joint.limits?.lower ?? -1, max: joint.limits?.upper ?? 1, step: 0.01 };
+    if (joint.type === 'continuous') return { min: -Math.PI * 2, max: Math.PI * 2, step: 0.01 };
+    return { min: joint.limits?.lower ?? -Math.PI, max: joint.limits?.upper ?? Math.PI, step: 0.01 };
+  };
 
   return (
     <div className="kinematic-graph-panel">
       <div className="section-title-row">
-        <h4>Kinematic Graph</h4>
-        <span>{graph.joints.length} joints</span>
+        <h4>Kinematic Authoring</h4>
+        <span>Kinematic Graph | {graph.joints.length} joints</span>
       </div>
       <div className="graph-readiness">
         <span>Parts {graph.parts.length}</span>
         <span>Movable {movableParts}</span>
         <span>Validated {validatedCount}</span>
       </div>
+      <div className="kinematic-authoring-actions">
+        <button title="Create joint from selected parts" disabled={selectedPartNames.length < 2} onClick={() => createKinematicJoint(node.id, selectedPartNames)}>
+          <Hammer size={14} />
+          <span>Create Joint</span>
+        </button>
+        <button title="Reset all joint tests to home" onClick={() => resetKinematicPose(node.id)}>
+          <RotateCw size={14} />
+          <span>Home</span>
+        </button>
+      </div>
+      {validationIssues.length ? (
+        <div className="kinematic-validation-summary">
+          {validationIssues.slice(0, 3).map((issue) => (
+            <span key={`${issue.code}-${issue.jointId ?? issue.partId ?? 'graph'}`}>{issue.code}</span>
+          ))}
+        </div>
+      ) : (
+        <div className="kinematic-validation-summary ok">
+          <span>VALID GRAPH</span>
+        </div>
+      )}
       {graph.joints.length ? (
         <div className="kinematic-joint-list">
           {graph.joints.map((joint) => (
@@ -2879,29 +3347,181 @@ const KinematicGraphPanel = ({ geometry }: { geometry: ImportedModelGeometry }) 
                 <strong title={joint.name}>{joint.name}</strong>
                 <span>{joint.status}</span>
               </div>
+              <div className="joint-authoring-grid">
+                <label>
+                  <span>Parent</span>
+                  <select value={joint.parentPartId} onChange={(event) => updateKinematicJoint(node.id, joint.id, { parentPartId: event.target.value })}>
+                    {graph.parts.map((part) => (
+                      <option key={part.id} value={part.id}>
+                        {part.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Child</span>
+                  <select value={joint.childPartId} onChange={(event) => updateKinematicJoint(node.id, joint.id, { childPartId: event.target.value })}>
+                    {graph.parts.map((part) => (
+                      <option key={part.id} value={part.id}>
+                        {part.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Type</span>
+                  <select value={joint.type} onChange={(event) => updateKinematicJoint(node.id, joint.id, { type: event.target.value as KinematicJoint['type'] })}>
+                    {['fixed', 'revolute', 'continuous', 'prismatic'].map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="axis-buttons">
+                  <button title="Use X axis" onClick={() => updateAxis(joint, [1, 0, 0])}>X</button>
+                  <button title="Use Y axis" onClick={() => updateAxis(joint, [0, 1, 0])}>Y</button>
+                  <button title="Use Z axis" onClick={() => updateAxis(joint, [0, 0, 1])}>Z</button>
+                </div>
+              </div>
+              <VectorEditor
+                label="Axis"
+                values={joint.axis}
+                step={0.01}
+                onChange={(index, value) => {
+                  const next: [number, number, number] = [...joint.axis];
+                  next[index] = value;
+                  updateAxis(joint, next);
+                }}
+              />
+              <VectorEditor
+                label="Origin"
+                values={joint.origin.position}
+                step={0.01}
+                onChange={(index, value) => {
+                  const next: [number, number, number] = [...joint.origin.position];
+                  next[index] = value;
+                  updateOrigin(joint, next);
+                }}
+              />
+              <div className="joint-authoring-grid compact">
+                <label>
+                  <span>Min</span>
+                  <input
+                    type="number"
+                    step={0.01}
+                    value={joint.limits?.lower ?? ''}
+                    onChange={(event) => updateKinematicJoint(node.id, joint.id, { limits: { ...joint.limits, lower: Number(event.target.value) } })}
+                  />
+                </label>
+                <label>
+                  <span>Max</span>
+                  <input
+                    type="number"
+                    step={0.01}
+                    value={joint.limits?.upper ?? ''}
+                    onChange={(event) => updateKinematicJoint(node.id, joint.id, { limits: { ...joint.limits, upper: Number(event.target.value) } })}
+                  />
+                </label>
+              </div>
+              <div className="joint-authoring-grid compact">
+                <label>
+                  <span>Mimic</span>
+                  <select
+                    value={joint.coupling?.driverJointId ?? ''}
+                    onChange={(event) =>
+                      updateKinematicJoint(node.id, joint.id, {
+                        coupling: event.target.value
+                          ? { driverJointId: event.target.value, multiplier: joint.coupling?.multiplier ?? 1, offset: joint.coupling?.offset ?? 0 }
+                          : undefined,
+                      })
+                    }
+                  >
+                    <option value="">none</option>
+                    {graph.joints
+                      .filter((candidate) => candidate.id !== joint.id)
+                      .map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Multiplier</span>
+                  <input
+                    type="number"
+                    step={0.1}
+                    disabled={!joint.coupling}
+                    value={joint.coupling?.multiplier ?? 1}
+                    onChange={(event) =>
+                      joint.coupling &&
+                      updateKinematicJoint(node.id, joint.id, { coupling: { ...joint.coupling, multiplier: Number(event.target.value) } })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Offset</span>
+                  <input
+                    type="number"
+                    step={0.01}
+                    disabled={!joint.coupling}
+                    value={joint.coupling?.offset ?? 0}
+                    onChange={(event) =>
+                      joint.coupling && updateKinematicJoint(node.id, joint.id, { coupling: { ...joint.coupling, offset: Number(event.target.value) } })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="joint-visual-tools">
+                <button title="Pick joint origin on model" onClick={() => startKinematicEdit(node.id, joint.id, 'pick-origin')}>
+                  <Circle size={14} />
+                  <span>Pick Origin</span>
+                </button>
+                <button title="Edit axis with viewport gizmo" onClick={() => startKinematicEdit(node.id, joint.id, 'axis-gizmo')}>
+                  <Move3D size={14} />
+                  <span>Axis Gizmo</span>
+                </button>
+                <button title="Pick first axis point" onClick={() => startKinematicEdit(node.id, joint.id, 'pick-axis-a')}>
+                  <Square size={14} />
+                  <span>Axis A</span>
+                </button>
+                <button title="Pick second axis point" onClick={() => startKinematicEdit(node.id, joint.id, 'pick-axis-b')}>
+                  <Square size={14} />
+                  <span>Axis B</span>
+                </button>
+              </div>
+              <Slider
+                label="Test"
+                value={state.jointValues[joint.id] ?? 0}
+                {...sliderRange(joint)}
+                onChange={(value) => setKinematicJointValue(node.id, joint.id, value)}
+              />
+              <div className="joint-authoring-actions">
+                <button title="Accept joint" onClick={() => acceptKinematicJoint(node.id, joint.id)}>
+                  <Check size={14} />
+                </button>
+                <button title="Reject joint" onClick={() => rejectKinematicJoint(node.id, joint.id)}>
+                  <X size={14} />
+                </button>
+                <button title="Reset test to zero" onClick={() => setKinematicJointValue(node.id, joint.id, 0)}>
+                  <RotateCw size={14} />
+                </button>
+                <button title="Delete joint" onClick={() => deleteKinematicJoint(node.id, joint.id)}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
               <dl>
-                <dt>Parent</dt>
-                <dd>{partById.get(joint.parentPartId)?.name ?? joint.parentPartId}</dd>
-                <dt>Child</dt>
-                <dd>{partById.get(joint.childPartId)?.name ?? joint.childPartId}</dd>
-                <dt>Type</dt>
-                <dd>{joint.type}</dd>
-                <dt>Axis</dt>
-                <dd>[{formatVector(joint.axis)}]</dd>
-                <dt>Pivot</dt>
-                <dd>[{formatVector(joint.origin.position)}]</dd>
-                <dt>Limits</dt>
-                <dd>
-                  {joint.limits?.lower?.toFixed(2) ?? 'n/a'} / {joint.limits?.upper?.toFixed(2) ?? 'n/a'}
-                </dd>
                 <dt>Evidence</dt>
                 <dd>{joint.evidence.map((item) => item.type).join(', ') || 'none'}</dd>
+                <dt>Issues</dt>
+                <dd>{issueByJoint.get(joint.id)?.join(', ') ?? 'none'}</dd>
               </dl>
             </div>
           ))}
         </div>
       ) : (
-        <div className="empty-state">No kinematic joints yet. Use manual authoring in the next milestone.</div>
+        <div className="empty-state">No kinematic joints yet. Select two parts and create a candidate joint.</div>
       )}
     </div>
   );
@@ -2923,6 +3543,15 @@ type GeometryInspectorProps = {
   stopMotionTrainer: () => void;
   moveValidatedMotion: (nodeId: string, motionId: string, direction: -1 | 1) => void;
   removeValidatedMotion: (nodeId: string, motionId: string) => void;
+  selectedPartNames: string[];
+  setKinematicJointValue: (nodeId: string, jointId: string, value: number) => void;
+  resetKinematicPose: (nodeId: string) => void;
+  updateKinematicJoint: (nodeId: string, jointId: string, patch: Partial<KinematicJoint>) => void;
+  startKinematicEdit: (nodeId: string, jointId: string, mode: KinematicEditTarget['mode']) => void;
+  acceptKinematicJoint: (nodeId: string, jointId: string) => void;
+  rejectKinematicJoint: (nodeId: string, jointId: string) => void;
+  deleteKinematicJoint: (nodeId: string, jointId: string) => void;
+  createKinematicJoint: (nodeId: string, selectedPartNames: string[]) => void;
   randomizeGenerator: () => void;
 };
 
@@ -2942,6 +3571,15 @@ const GeometryInspector = ({
   stopMotionTrainer,
   moveValidatedMotion,
   removeValidatedMotion,
+  selectedPartNames,
+  setKinematicJointValue,
+  resetKinematicPose,
+  updateKinematicJoint,
+  startKinematicEdit,
+  acceptKinematicJoint,
+  rejectKinematicJoint,
+  deleteKinematicJoint,
+  createKinematicJoint,
   randomizeGenerator,
 }: GeometryInspectorProps) => {
   const geometry = node.geometry;
@@ -3015,7 +3653,18 @@ const GeometryInspector = ({
           <span>Scene {(geometry.normalizedBounds ?? [0, 0, 0]).map((value) => value.toFixed(2)).join(' x ')}</span>
           <span>Scale {(geometry.importScale ?? 1).toFixed(4)}</span>
         </div>
-        <KinematicGraphPanel geometry={geometry} />
+        <KinematicGraphPanel
+          node={node}
+          selectedPartNames={selectedPartNames}
+          setKinematicJointValue={setKinematicJointValue}
+          resetKinematicPose={resetKinematicPose}
+          updateKinematicJoint={updateKinematicJoint}
+          startKinematicEdit={startKinematicEdit}
+          acceptKinematicJoint={acceptKinematicJoint}
+          rejectKinematicJoint={rejectKinematicJoint}
+          deleteKinematicJoint={deleteKinematicJoint}
+          createKinematicJoint={createKinematicJoint}
+        />
         <button className={demoActive ? 'smart-motion-button active' : 'smart-motion-button'} disabled={!geometry.joints.length} onClick={toggleImportedMotionDemo}>
           {demoActive ? <Pause size={16} /> : <Activity size={16} />}
           <span>{demoActive ? 'Stop Smart Demo' : validatedMotions.length ? 'Start Learned Demo' : 'Start Smart Demo'}</span>

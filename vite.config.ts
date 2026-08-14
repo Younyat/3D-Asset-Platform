@@ -91,7 +91,6 @@ const warehousePlugin = () => ({
           const projectId = safeName(String(url.searchParams.get('projectId') ?? 'default-project'));
           const key = safeName(String(url.searchParams.get('key') ?? randomUUID()));
           const overwrite = url.searchParams.get('overwrite') === '1';
-          const metadata = JSON.parse(decodeURIComponent(String(url.searchParams.get('metadata') ?? '{}')));
           const projectDir = join(warehouseRoot, projectId);
           await mkdir(projectDir, { recursive: true });
 
@@ -117,15 +116,10 @@ const warehousePlugin = () => ({
           const nextEntry = {
             key,
             fileName,
-            name: metadata.name ?? key,
-            itemType: metadata.itemType ?? 'part',
-            category: metadata.category ?? 'General',
-            className: metadata.className ?? 'Component',
-            code: metadata.code,
-            objectName: metadata.objectName,
-            sourceAssetName: metadata.sourceAssetName,
-            material: metadata.material,
-            thumbnailDataUrl: metadata.thumbnailDataUrl,
+            name: key,
+            itemType: 'part',
+            category: 'General',
+            className: 'Component',
             savedAt: new Date().toISOString(),
             sizeBytes: payload.byteLength,
           };
@@ -142,6 +136,58 @@ const warehousePlugin = () => ({
       });
     });
 
+    server.middlewares.use('/__warehouse/metadata', async (request, response) => {
+      if (request.method !== 'POST') {
+        response.statusCode = 405;
+        response.end();
+        return;
+      }
+
+      let body = '';
+      request.on('data', (chunk) => {
+        body += String(chunk);
+      });
+      request.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const projectId = safeName(String(parsed.projectId ?? 'default-project'));
+          const key = safeName(String(parsed.key ?? ''));
+          const metadata = parsed.metadata ?? {};
+          const projectDir = join(warehouseRoot, projectId);
+          const manifestPath = join(projectDir, 'manifest.json');
+          const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+          const index = Array.isArray(manifest.items) ? manifest.items.findIndex((item) => item.key === key) : -1;
+          if (index < 0) {
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify({ updated: 0 }));
+            return;
+          }
+
+          manifest.items[index] = {
+            ...manifest.items[index],
+            name: metadata.name ?? manifest.items[index].name,
+            itemType: metadata.itemType ?? manifest.items[index].itemType,
+            category: metadata.category ?? manifest.items[index].category,
+            className: metadata.className ?? manifest.items[index].className,
+            code: metadata.code,
+            objectName: metadata.objectName,
+            sourceAssetName: metadata.sourceAssetName,
+            material: metadata.material,
+            thumbnailDataUrl: metadata.thumbnailDataUrl,
+            functionalComponent: metadata.functionalComponent,
+            functionalAssembly: metadata.functionalAssembly,
+            savedAt: new Date().toISOString(),
+          };
+          await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+          response.setHeader('Content-Type', 'application/json');
+          response.end(JSON.stringify({ updated: 1, manifest }));
+        } catch (error) {
+          response.statusCode = 500;
+          response.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Warehouse metadata save failed' }));
+        }
+      });
+    });
+
     server.middlewares.use('/__warehouse/load', async (request, response) => {
       try {
         const url = new URL(request.url ?? '', 'http://127.0.0.1');
@@ -153,6 +199,66 @@ const warehousePlugin = () => ({
         for (const entry of manifest.items ?? []) {
           if (String(entry.fileName).toLowerCase().endsWith('.glb')) {
             const buffer = await readFile(join(projectDir, entry.fileName));
+            const geometry = {
+              kind: 'imported-model',
+              assetName: entry.fileName,
+              assetDataUrl: `data:model/gltf-binary;base64,${buffer.toString('base64')}`,
+              sourceFormat: 'glb',
+              importScale: 1,
+              importOffset: [0, 0, 0],
+              originalBounds: [1, 1, 1],
+              normalizedBounds: [1, 1, 1],
+              bones: [],
+              animations: [],
+              joints: [],
+              validatedMotions: [],
+              freePartTransforms: [],
+              partMaterials: [],
+              isolatedObjectNames: [],
+              partObjectNames: [],
+            };
+            const material = entry.material ?? { name: 'Stored GLB', color: '#8b949e', roughness: 0.52, metalness: 0.08 };
+            const storageMetadata = {
+              sourceFormat: 'glb',
+              originalBounds: [1, 1, 1],
+              storedAt: entry.savedAt,
+              updatedAt: entry.savedAt,
+              storageKey: entry.key,
+              storageProjectId: projectId,
+              storageFileName: entry.fileName,
+            };
+
+            if (entry.itemType === 'assembly') {
+              items.push({
+                id: `assembly_${entry.key}`,
+                itemType: 'assembly',
+                thumbnailDataUrl: entry.thumbnailDataUrl,
+                code: entry.code ?? entry.key,
+                name: entry.name,
+                category: 'Assemblies',
+                className: entry.className ?? 'Composite',
+                sourceAssetName: entry.sourceAssetName ?? entry.fileName,
+                assemblyNodes: [
+                  {
+                    id: `node_${entry.key}`,
+                    name: entry.name,
+                    geometry,
+                    transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+                    material,
+                    visible: true,
+                    locked: false,
+                    createdAt: entry.savedAt,
+                  },
+                ],
+                functionalAssembly: entry.functionalAssembly,
+                metadata: {
+                  ...storageMetadata,
+                  sourceFormat: 'assembly',
+                },
+              });
+              continue;
+            }
+
             items.push({
               id: `part_${entry.key}`,
               itemType: 'part',
@@ -164,33 +270,12 @@ const warehousePlugin = () => ({
               sourceNodeId: `file_${entry.key}`,
               sourceAssetName: entry.sourceAssetName ?? entry.fileName,
               objectName: entry.objectName ?? entry.name,
-              geometry: {
-                kind: 'imported-model',
-                assetName: entry.fileName,
-                assetDataUrl: `data:model/gltf-binary;base64,${buffer.toString('base64')}`,
-                sourceFormat: 'glb',
-                importScale: 1,
-                importOffset: [0, 0, 0],
-                originalBounds: [1, 1, 1],
-                normalizedBounds: [1, 1, 1],
-                bones: [],
-                animations: [],
-                joints: [],
-                validatedMotions: [],
-                freePartTransforms: [],
-                partMaterials: [],
-                isolatedObjectNames: [],
-                partObjectNames: [],
-              },
-              material: entry.material ?? { name: 'Stored GLB', color: '#8b949e', roughness: 0.52, metalness: 0.08 },
+              geometry,
+              material,
+              functionalComponent: entry.functionalComponent,
               metadata: {
+                ...storageMetadata,
                 sourceFormat: 'glb',
-                originalBounds: [1, 1, 1],
-                storedAt: entry.savedAt,
-                updatedAt: entry.savedAt,
-                storageKey: entry.key,
-                storageProjectId: projectId,
-                storageFileName: entry.fileName,
               },
             });
           } else {
