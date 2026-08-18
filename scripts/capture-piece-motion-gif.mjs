@@ -9,6 +9,7 @@ const port = Number(process.env.PIECE_MOTION_GIF_PORT ?? 5213);
 const viteBin = resolve('node_modules', 'vite', 'bin', 'vite.js');
 const modelPath = resolve('3d imported models', 'sk095yah4v7k-ModelRmk3', 'Rmk3.obj');
 const outputPath = resolve(process.env.PIECE_MOTION_GIF_OUTPUT ?? 'docs/readme-assets/piece-rotation-demo.gif');
+const jointIndex = Math.max(0, Number.parseInt(process.env.PIECE_MOTION_JOINT_INDEX ?? '0', 10) || 0);
 
 const waitForServer = async (url, timeoutMs = 30000) => {
   const started = Date.now();
@@ -77,7 +78,9 @@ try {
     await page.waitForFunction(() => document.body.innerText.includes('Mechanical Setup'), undefined, { timeout: 120000 });
     await page.getByRole('button', { name: /Analyze Mechanics/ }).click();
     await page.waitForSelector('.kinematic-joint-row', { timeout: 30000 });
-    await page.locator('.kinematic-joint-row').first().getByRole('button', { name: /Show Joint/ }).click();
+    const jointRows = page.locator('.kinematic-joint-row');
+    if ((await jointRows.count()) <= jointIndex) throw new Error(`Joint index ${jointIndex} is not available in Rmk3.`);
+    await jointRows.nth(jointIndex).getByRole('button', { name: /Show Joint/ }).click();
     await page.waitForFunction(() => window.__assetForgeViewportActiveJointPoint?.(), undefined, { timeout: 30000 });
     await rightClickActiveJoint(page);
     await page.getByRole('button', { name: /Analyze piece/ }).click();
@@ -97,15 +100,29 @@ try {
       const joint = geometry?.kinematicGraph?.joints?.[0];
       return Math.abs(joint ? geometry?.kinematicState?.jointValues?.[joint.id] ?? 0 : 0) > 0.001;
     }, undefined, { timeout: 30000 });
+    await page.waitForTimeout(180);
     frames.push(await captureCanvasFrame(page));
     await page.waitForFunction(async () => {
       const geometry = window.__assetForgeDocument?.nodes[0]?.geometry;
       const joint = geometry?.kinematicGraph?.joints?.[0];
       return (joint ? geometry?.kinematicState?.jointValues?.[joint.id] ?? 0 : 0) < -0.001;
     }, undefined, { timeout: 30000 });
+    await page.waitForTimeout(180);
     frames.push(await captureCanvasFrame(page));
 
     const decoded = frames.map((frame) => ({ width: frame.width, height: frame.height, pixels: Buffer.from(frame.pixels, 'base64') }));
+    let sourceChangedPixels = 0;
+    for (let index = 0; index < decoded[0].pixels.length; index += 16) {
+      if (Math.abs(decoded[0].pixels[index] - decoded[1].pixels[index]) + Math.abs(decoded[0].pixels[index + 1] - decoded[1].pixels[index + 1]) + Math.abs(decoded[0].pixels[index + 2] - decoded[1].pixels[index + 2]) > 18) sourceChangedPixels += 1;
+    }
+    if (sourceChangedPixels < 12) throw new Error(`Captured motion is not visibly different (${sourceChangedPixels} changed samples).`);
+    let indexedChangedPixels = 0;
+    for (let index = 0; index < decoded[0].pixels.length; index += 16) {
+      const first = (decoded[0].pixels[index] & 0xe0) | ((decoded[0].pixels[index + 1] & 0xe0) >> 3) | ((decoded[0].pixels[index + 2] & 0xc0) >> 6);
+      const second = (decoded[1].pixels[index] & 0xe0) | ((decoded[1].pixels[index + 1] & 0xe0) >> 3) | ((decoded[1].pixels[index + 2] & 0xc0) >> 6);
+      if (first !== second) indexedChangedPixels += 1;
+    }
+    if (indexedChangedPixels < 12) throw new Error(`GIF palette removes visible motion (${indexedChangedPixels} changed samples).`);
     const gif = encodeGif({ width: decoded[0].width, height: decoded[0].height, frames: decoded, delayCentiseconds: 65 });
     const gifDimensions = await page.evaluate(
       (source) =>
@@ -121,7 +138,19 @@ try {
       throw new Error('Generated GIF dimensions are invalid.');
     }
     writeFileSync(outputPath, gif);
-    console.log(`Piece motion GIF written: ${outputPath}`);
+    const source = `data:image/gif;base64,${gif.toString('base64')}`;
+    await page.setContent(`<img id="gif-animation-validation" src="${source}" alt="Animation validation">`);
+    const animation = page.locator('#gif-animation-validation');
+    await animation.waitFor({ state: 'visible' });
+    const firstRender = await animation.screenshot();
+    await page.waitForTimeout(900);
+    const secondRender = await animation.screenshot();
+    let animatedBytes = 0;
+    for (let index = 0; index < Math.min(firstRender.length, secondRender.length); index += 23) {
+      if (firstRender[index] !== secondRender[index]) animatedBytes += 1;
+    }
+    if (animatedBytes < 12) throw new Error(`Generated GIF is not visibly animated (${animatedBytes} changed render samples).`);
+    console.log(`Piece motion GIF written: ${outputPath} (${animatedBytes} changed render samples, joint ${jointIndex})`);
     await context.close();
   } finally {
     await browser.close();

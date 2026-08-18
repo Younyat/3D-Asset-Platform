@@ -231,7 +231,19 @@ La pieza no se mueve durante el calculo. Despues se selecciona el comportamiento
 
 ![Prueba real de rotacion Z desde el pivot de la pieza](docs/readme-assets/piece-rotation-test.png)
 
-![Demo animada de la rotacion de una pieza aislada](docs/readme-assets/piece-rotation-demo.gif)
+Las siguientes capturas animadas se generan desde tres articulaciones distintas del brazo Rmk3. Cada GIF se valida en Chromium comparando dos renderizados de la propia animacion antes de guardarse.
+
+**Base rotativa**
+
+![Rotacion de la base del robot](docs/readme-assets/piece-rotation-demo.gif)
+
+**Enlace articulado**
+
+![Rotacion de un enlace del robot](docs/readme-assets/piece-link-rotation.gif)
+
+**Cabezal**
+
+![Rotacion del cabezal del robot](docs/readme-assets/piece-head-rotation.gif)
 
 La geometria por si sola no puede demostrar la funcion fisica real de una pieza sin sus conexiones, contactos o especificacion mecanica. Por eso la plataforma automatiza el calculo y las invariantes geometricas, pero deja al usuario validar la funcion mecanica observada antes de aceptarla. Esta separacion evita inventar articulaciones falsas.
 
@@ -360,7 +372,9 @@ Assets actuales:
 - `learned-motion-demo.gif`
 - `piece-reference-center.png` (evidencia Playwright del centro calculado)
 - `piece-rotation-test.png` (evidencia Playwright de la prueba de rotacion)
-- `piece-rotation-demo.gif` (animacion real de la prueba de rotacion)
+- `piece-rotation-demo.gif` (animacion validada de la base rotativa)
+- `piece-link-rotation.gif` (animacion validada de un enlace articulado)
+- `piece-head-rotation.gif` (animacion validada del cabezal)
 
 ## Estado De Validacion
 
@@ -389,10 +403,18 @@ Para regenerar las capturas del README desde esta prueba en Windows PowerShell:
 $env:PIECE_MODE_CAPTURE_DIR='docs/readme-assets'; npm.cmd run test:piece-mode
 ```
 
-Para regenerar el GIF animado de la pieza:
+Para regenerar una animacion de una pieza:
 
 ```powershell
 npm.cmd run docs:capture:piece-motion
+```
+
+Para generar las tres demostraciones mecanicas del README:
+
+```powershell
+$env:PIECE_MOTION_JOINT_INDEX='0'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-rotation-demo.gif'; npm.cmd run docs:capture:piece-motion
+$env:PIECE_MOTION_JOINT_INDEX='1'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-link-rotation.gif'; npm.cmd run docs:capture:piece-motion
+$env:PIECE_MOTION_JOINT_INDEX='2'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-head-rotation.gif'; npm.cmd run docs:capture:piece-motion
 ```
 
 El aviso de bundle grande es esperado porque la aplicacion incluye Three.js y varios loaders 3D. No bloquea la build de produccion.

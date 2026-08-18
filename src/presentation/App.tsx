@@ -2211,7 +2211,13 @@ export const App = () => {
       return;
     }
 
-    const sourceObjectName = sourceNode.geometry.kind === 'imported-model' ? event.objectName ?? sourceNode.geometry.isolatedObjectNames?.[0] ?? sourceNode.name : sourceNode.name;
+    const sourceGraph = graphFromGeometry(sourceNode.geometry);
+    const jointChildObjectName = event.jointId
+      ? sourceGraph?.parts.find((part) => part.id === sourceGraph.joints.find((joint) => joint.id === event.jointId)?.childPartId)?.meshObjectIds.find(Boolean)
+      : undefined;
+    const sourceObjectName = sourceNode.geometry.kind === 'imported-model'
+      ? event.objectName?.trim() || jointChildObjectName || sourceNode.geometry.isolatedObjectNames?.[0] || sourceNode.name
+      : sourceNode.name;
     const name = cleanPartToken(sourceObjectName);
     const componentId = functionalComponentId(sourceNode.geometry.kind === 'imported-model' ? sourceNode.geometry.assetName : sourceNode.geometry.assetName, sourceObjectName);
     const graph = createStandalonePieceGraph(componentId, name, sourceObjectName, sourceNode.geometry.normalizedBounds, pieceReferenceCenter(sourceNode.geometry));
