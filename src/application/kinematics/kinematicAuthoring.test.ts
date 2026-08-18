@@ -11,6 +11,7 @@ import {
   updateJoint,
   validateKinematicGraph,
 } from './kinematicAuthoring';
+import { estimatePieceReferenceCenter } from './referenceCenter';
 
 const nearly = (actual: number, expected: number, tolerance = 1e-6) => {
   if (Math.abs(actual - expected) > tolerance) throw new Error(`Expected ${actual} to be near ${expected}.`);
@@ -52,6 +53,35 @@ const graph = (parts: MechanicalPart[], joints: KinematicJoint[], rootPartId = '
 const hasIssue = (graphInput: KinematicGraph, code: string) => validateKinematicGraph(graphInput).some((issue) => issue.code === code);
 
 export const runKinematicAuthoringTests = () => {
+  const tetrahedronCenter = estimatePieceReferenceCenter(
+    [
+      [[0, 0, 0], [0, 1, 0], [1, 0, 0]],
+      [[0, 0, 0], [1, 0, 0], [0, 0, 1]],
+      [[0, 0, 0], [0, 0, 1], [0, 1, 0]],
+      [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    ],
+    [0.5, 0.5, 0.5],
+    '2026-01-01T00:00:00.000Z',
+  );
+  ok(tetrahedronCenter.method === 'volume-centroid', 'Reference center did not use the volume centroid for a closed mesh.');
+  tetrahedronCenter.position.forEach((value) => nearly(value, 0.25));
+
+  const sheetCenter = estimatePieceReferenceCenter(
+    [[[0, 0, 0], [2, 0, 0], [0, 2, 0]]],
+    [1, 1, 0],
+    '2026-01-01T00:00:00.000Z',
+  );
+  ok(sheetCenter.method === 'surface-centroid', 'Reference center did not fall back to the surface centroid for an open mesh.');
+  nearly(sheetCenter.position[0], 2 / 3);
+  nearly(sheetCenter.position[1], 2 / 3);
+  nearly(sheetCenter.position[2], 0);
+
+  const emptyCenter = estimatePieceReferenceCenter([], [3, 4, 5], '2026-01-01T00:00:00.000Z');
+  ok(emptyCenter.method === 'bounds-center', 'Reference center did not provide a safe bounds fallback.');
+  nearly(emptyCenter.position[0], 3);
+  nearly(emptyCenter.position[1], 4);
+  nearly(emptyCenter.position[2], 5);
+
   const normalized = normalizeAxis([10, 0, 0]);
   ok(Boolean(normalized), 'K01 axis did not normalize.');
   nearly(normalized?.[0] ?? 0, 1);
@@ -69,6 +99,23 @@ export const runKinematicAuthoringTests = () => {
     const pose = evaluateForwardKinematics(revoluteGraph, state);
     const point = transformPoint(pose.b.matrix, [0, 0, 0]);
     nearly(distancePointToAxis(point, [0, 0, 0], [0, 0, 1]), 1);
+  });
+  [
+    { axis: [1, 0, 0] as [number, number, number], plane: 'yz' as const },
+    { axis: [0, 1, 0] as [number, number, number], plane: 'xy' as const },
+    { axis: [0, 0, 1] as [number, number, number], plane: 'xz' as const },
+  ].forEach(({ axis, plane }) => {
+    const centeredRotationGraph = graph([part('a'), part('b')], [joint('j1', 'a', 'b', { axis, motionPlane: plane })]);
+    const centeredRotationPose = evaluateForwardKinematics(centeredRotationGraph, setJointValue(centeredRotationGraph, undefined, 'j1', Math.PI / 2)).b.position;
+    nearly(centeredRotationPose[0], 0);
+    nearly(centeredRotationPose[1], 0);
+    nearly(centeredRotationPose[2], 0);
+
+    const pureSlideGraph = graph([part('a'), part('b')], [joint('j1', 'a', 'b', { type: 'prismatic', axis, motionPlane: plane, motionProfile: 'linear-slide' })]);
+    const pureSlidePose = evaluateForwardKinematics(pureSlideGraph, setJointValue(pureSlideGraph, undefined, 'j1', 0.4)).b.position;
+    nearly(pureSlidePose[0], axis[0] * 0.4);
+    nearly(pureSlidePose[1], axis[1] * 0.4);
+    nearly(pureSlidePose[2], axis[2] * 0.4);
   });
 
   const continuousGraph = graph([part('a'), part('b', [1, 0, 0])], [joint('j1', 'a', 'b', { type: 'continuous', limits: undefined })]);
@@ -89,6 +136,44 @@ export const runKinematicAuthoringTests = () => {
   const perpendicular = Math.hypot(prismaticPose[0] - prismaticAxis[0] * projection, prismaticPose[1] - prismaticAxis[1] * projection, prismaticPose[2]);
   nearly(projection, distance);
   nearly(perpendicular, 0);
+
+  const fixedEndLiftGraph = graph(
+    [part('a'), part('b', [1, 0, 0])],
+    [
+      joint('j1', 'a', 'b', {
+        type: 'prismatic',
+        motionProfile: 'fixed-origin-lift',
+        origin: { position: [0, 0, 0], rotation: [0, 0, 0, 1] },
+        drivenPoint: [1, 0, 0],
+        axis: [0, 1, 0],
+        limits: { lower: -0.5, upper: 0.5 },
+      }),
+    ],
+  );
+  const fixedEndLiftPose = evaluateForwardKinematics(fixedEndLiftGraph, setJointValue(fixedEndLiftGraph, undefined, 'j1', 0.25)).b.position;
+  ok(Math.abs(fixedEndLiftPose[0] - 1) < 0.04 && fixedEndLiftPose[1] > 0.24, 'K09 fixed-end lift did not keep the pivot side stable while lifting the driven end.');
+  nearly(fixedEndLiftPose[2], 0);
+
+  const planeLockedSlideGraph = graph([part('a'), part('b')], [joint('j1', 'a', 'b', { type: 'prismatic', motionProfile: 'linear-slide', motionPlane: 'xy', axis: [1, 1, 1], limits: { lower: -5, upper: 5 } })]);
+  const planeLockedSlidePose = evaluateForwardKinematics(planeLockedSlideGraph, setJointValue(planeLockedSlideGraph, undefined, 'j1', 1)).b.position;
+  nearly(planeLockedSlidePose[2], 0);
+
+  const planeLockedLiftGraph = graph(
+    [part('a'), part('b', [1, 0, 0])],
+    [
+      joint('j1', 'a', 'b', {
+        type: 'prismatic',
+        motionProfile: 'fixed-origin-lift',
+        motionPlane: 'xy',
+        origin: { position: [0, 0, 0], rotation: [0, 0, 0, 1] },
+        drivenPoint: [1, 0, 0],
+        axis: [0, 1, 1],
+        limits: { lower: -0.5, upper: 0.5 },
+      }),
+    ],
+  );
+  const planeLockedLiftPose = evaluateForwardKinematics(planeLockedLiftGraph, setJointValue(planeLockedLiftGraph, undefined, 'j1', 0.2)).b.position;
+  nearly(planeLockedLiftPose[2], 0);
 
   const fixedGraph = graph([part('a'), part('b', [1, 0, 0])], [joint('j1', 'a', 'b', { type: 'fixed' })]);
   const fixedPose = evaluateForwardKinematics(fixedGraph, setJointValue(fixedGraph, undefined, 'j1', Math.PI)).b.position;

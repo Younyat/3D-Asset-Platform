@@ -343,6 +343,25 @@ h3 {
   height: 100%;
 }
 
+.viewport-guidance-toast {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  z-index: 12;
+  max-width: min(560px, calc(100% - 28px));
+  padding: 7px 10px;
+  border: 1px solid rgba(123, 149, 160, 0.32);
+  border-radius: 6px;
+  background: rgba(12, 16, 19, 0.66);
+  color: rgba(238, 244, 247, 0.92);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  transform: translateX(-50%);
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+
 .viewport-resource-meter {
   position: absolute;
   right: 8px;
@@ -645,6 +664,151 @@ input[type="color"] {
   padding: 8px;
   margin-bottom: 10px;
   background: #1b1f23;
+}
+
+.viewport-context-menu {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 5px;
+  width: 270px;
+  max-height: min(420px, calc(100vh - 18px));
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(112, 132, 144, 0.42);
+  border-radius: 8px;
+  background: rgba(21, 26, 31, 0.92);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+}
+
+.viewport-context-menu button {
+  justify-content: flex-start;
+  min-height: 30px;
+  border-color: rgba(89, 105, 115, 0.7);
+  background: rgba(39, 47, 54, 0.76);
+}
+
+.viewport-context-head {
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+  border-bottom: 1px solid rgba(97, 113, 122, 0.35);
+}
+
+.viewport-context-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f2f6f8;
+  font-size: 13px;
+}
+
+.viewport-context-head span,
+.context-note,
+.nearby-joints span {
+  color: #aebac0;
+  font-size: 11px;
+}
+
+.context-note {
+  padding: 7px;
+  border: 1px solid rgba(119, 84, 63, 0.7);
+  border-radius: 6px;
+  background: rgba(55, 38, 29, 0.55);
+}
+
+.context-note.axis-guide {
+  grid-column: 1 / -1;
+  border-color: rgba(85, 214, 202, 0.36);
+  background: rgba(21, 43, 46, 0.64);
+  color: #ccefed;
+}
+
+.nearby-joints {
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid rgba(70, 82, 90, 0.8);
+  border-radius: 6px;
+  background: rgba(25, 31, 36, 0.72);
+}
+
+.nearby-joints button {
+  min-height: 26px;
+  font-size: 11px;
+}
+
+.viewport-inspection-card {
+  position: fixed;
+  left: 50%;
+  bottom: 42px;
+  z-index: 55;
+  display: grid;
+  gap: 8px;
+  width: min(440px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid rgba(85, 214, 202, 0.36);
+  border-radius: 8px;
+  background: rgba(20, 25, 30, 0.9);
+  box-shadow: 0 16px 45px rgba(0, 0, 0, 0.32);
+  transform: translateX(-50%);
+  backdrop-filter: blur(10px);
+}
+
+.viewport-inspection-card > div:first-child {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.viewport-inspection-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f2f6f8;
+  font-size: 13px;
+}
+
+.viewport-inspection-card span,
+.viewport-inspection-card p {
+  margin: 0;
+  color: #aebac0;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.viewport-inspection-actions,
+.viewport-repair-grid,
+.viewport-repair-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.viewport-repair-tools label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #aebac0;
+  font-size: 11px;
+}
+
+.viewport-repair-tools input {
+  width: 100%;
+  min-width: 0;
+}
+
+.stop-button {
+  min-height: 42px;
+  border-color: #ba4242;
+  background: #682626;
+  color: #fff2f2;
+  font-weight: 800;
+  letter-spacing: 0;
 }
 
 .kinematic-graph-panel {

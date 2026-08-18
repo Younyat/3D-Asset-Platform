@@ -85,6 +85,23 @@ const semanticInterfaces = (componentId: string, name: string, role: FunctionalC
   ];
 };
 
+const cleanMotionDefinition = (boundsSize: Vector3Tuple): FunctionalComponent['motionDefinition'] => ({
+  version: 1,
+  static: true,
+  endpointMode: 'single',
+  activeEndpointId: 'end_a',
+  endpoints: [
+    {
+      id: 'end_a',
+      name: 'Primary end',
+      role: 'single',
+      position: [0, boundsSize[1] / 2, 0],
+    },
+  ],
+  movements: [],
+  updatedAt: new Date().toISOString(),
+});
+
 const matchingGraphPartIds = (graph: KinematicGraph | undefined, objectName: string) => {
   if (!graph) return [];
   const text = objectName.toLowerCase();
@@ -206,6 +223,7 @@ export const buildFunctionalComponent = (input: BuildFunctionalComponentInput): 
     },
     interfaces,
     kinematicGraph,
+    motionDefinition: cleanMotionDefinition(input.bounds),
     sourceKinematicPartIds: sourcePartIds,
     metadata: {
       createdAt: new Date().toISOString(),

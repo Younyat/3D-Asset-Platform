@@ -1,6 +1,8 @@
 export type {
   Bounds3D,
   JointEvidence,
+  JointMotionPlane,
+  JointMotionProfile,
   JointType,
   JointValidationResult,
   KinematicGraph,

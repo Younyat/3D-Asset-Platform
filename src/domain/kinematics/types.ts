@@ -19,6 +19,10 @@ export type Transform3D = Transform;
 
 export type JointType = 'fixed' | 'revolute' | 'continuous' | 'prismatic' | 'spherical' | 'planar' | 'screw' | 'generic6dof';
 
+export type JointMotionProfile = 'rotation-around-origin' | 'linear-slide' | 'fixed-origin-lift';
+
+export type JointMotionPlane = 'xy' | 'xz' | 'yz';
+
 export type JointEvidence = {
   type:
     | 'semantic-name'
@@ -66,6 +70,9 @@ export type KinematicJoint = {
   };
   axis: Vector3Tuple;
   axis2?: Vector3Tuple;
+  motionProfile?: JointMotionProfile;
+  motionPlane?: JointMotionPlane;
+  drivenPoint?: Vector3Tuple;
   limits?: {
     lower?: number;
     upper?: number;

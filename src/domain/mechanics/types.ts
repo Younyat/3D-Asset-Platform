@@ -3,6 +3,39 @@ import type { MaterialDefinition, Transform, Vector3Tuple } from '../model';
 
 export type MechanicalInterfaceKind = 'axis' | 'hinge' | 'support' | 'rail' | 'shaft' | 'mount' | 'gripper' | 'surface';
 
+export type FunctionalComponentEndpointRole = 'single' | 'fixed' | 'moving';
+
+export type FunctionalComponentEndpoint = {
+  id: string;
+  name: string;
+  role: FunctionalComponentEndpointRole;
+  position: Vector3Tuple;
+  axis?: Vector3Tuple;
+};
+
+export type FunctionalComponentMovement = {
+  id: string;
+  endpointId: string;
+  kind: 'rotation' | 'translation';
+  axis: Vector3Tuple;
+  plane: 'xy' | 'xz' | 'yz';
+  limits: {
+    lower: number;
+    upper: number;
+  };
+  testValue: number;
+};
+
+export type FunctionalComponentMotionDefinition = {
+  version: 1;
+  static: boolean;
+  endpointMode: 'single' | 'two-end';
+  activeEndpointId?: string;
+  endpoints: FunctionalComponentEndpoint[];
+  movements: FunctionalComponentMovement[];
+  updatedAt: string;
+};
+
 export type MechanicalInterface = {
   id: string;
   componentId: string;
@@ -39,6 +72,7 @@ export type FunctionalComponent = {
   };
   interfaces: MechanicalInterface[];
   kinematicGraph: KinematicGraph;
+  motionDefinition?: FunctionalComponentMotionDefinition;
   sourceKinematicPartIds: string[];
   metadata: Record<string, unknown>;
 };

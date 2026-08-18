@@ -60,14 +60,16 @@ import {
   PartWarehouseAssemblyItem,
   PartWarehousePartItem,
   PartWarehouseItem,
+  PieceReferenceCenter,
   SceneNode,
   Transform,
   ValidatedJointMotion,
   ValidationIssue,
+  Vector3Tuple,
 } from '../domain/model';
 import type { KinematicGraph } from '../domain/kinematics';
 import type { KinematicJoint, MechanicalPart } from '../domain/kinematics';
-import type { FunctionalComponent } from '../domain/mechanics';
+import type { FunctionalComponent, FunctionalComponentMotionDefinition } from '../domain/mechanics';
 import {
   acceptJointCandidate,
   createHomeKinematicState,
@@ -113,8 +115,10 @@ import {
   KinematicAxisChangeEvent,
   KinematicEditTarget,
   KinematicPointPickEvent,
+  PieceReferenceCenterEstimateEvent,
   MotionTrainingPreview,
   ThreeViewport,
+  ViewportContextMenuEvent,
   ViewportStats,
 } from './components/ThreeViewport';
 import { buildFunctionalAssembly, buildFunctionalComponent } from '../application/mechanics/functionalModel';
@@ -314,6 +318,152 @@ const graphFromImportedGeometry = (geometry: ImportedModelGeometry): KinematicGr
   };
 };
 
+const graphFromGeometry = (geometry: GeometryDefinition): KinematicGraph | undefined => {
+  if (geometry.kind === 'imported-model') return graphFromImportedGeometry(geometry);
+  if (geometry.kind === 'serialized-object') return geometry.kinematicGraph;
+  return undefined;
+};
+
+type KinematicSceneGeometry = ImportedModelGeometry | Extract<GeometryDefinition, { kind: 'serialized-object' }>;
+
+const kinematicGeometryWithGraph = (geometry: GeometryDefinition): geometry is KinematicSceneGeometry =>
+  geometry.kind === 'imported-model' || geometry.kind === 'serialized-object';
+
+const pieceCenterFromBounds = (bounds: Vector3Tuple): Vector3Tuple => [0, bounds[1] / 2, 0];
+
+const pieceReferenceCenter = (geometry: KinematicSceneGeometry): Vector3Tuple => geometry.pieceReferenceCenter?.position ?? pieceCenterFromBounds(geometry.normalizedBounds);
+
+const createStandalonePieceGraph = (componentId: string, name: string, objectName: string, bounds: Vector3Tuple, referenceCenter = pieceCenterFromBounds(bounds)): KinematicGraph => {
+  const center = referenceCenter;
+  const rootPartId = `${componentId}_reference`;
+  const movingPartId = `${componentId}_body`;
+  return {
+    rootPartId,
+    parts: [
+      {
+        id: rootPartId,
+        name: 'REFERENCE',
+        meshObjectIds: [],
+        localFrame: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        bounds: {
+          min: [-bounds[0] / 2, 0, -bounds[2] / 2],
+          max: [bounds[0] / 2, bounds[1], bounds[2] / 2],
+          size: bounds,
+          center,
+        },
+        static: true,
+        visible: true,
+        source: 'manual-group',
+        metadata: { pieceReference: true },
+      },
+      {
+        id: movingPartId,
+        name,
+        meshObjectIds: [objectName, name],
+        localFrame: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        bounds: {
+          min: [-bounds[0] / 2, 0, -bounds[2] / 2],
+          max: [bounds[0] / 2, bounds[1], bounds[2] / 2],
+          size: bounds,
+          center,
+        },
+        static: false,
+        visible: true,
+        source: 'manual-group',
+        metadata: { isolatedPiece: true },
+      },
+    ],
+    joints: [
+      {
+        id: `${componentId}_motion_end_a`,
+        name: 'End A motion',
+        parentPartId: rootPartId,
+        childPartId: movingPartId,
+        type: 'fixed',
+        origin: { position: center, rotation: [0, 0, 0, 1] },
+        axis: [0, 0, 1],
+        motionProfile: 'rotation-around-origin',
+        motionPlane: 'xy',
+        limits: { lower: -0.8, upper: 0.8 },
+        source: 'manual',
+        confidence: 1,
+        evidence: [{ type: 'manual', score: 1, message: 'Clean isolated piece motion definition.' }],
+        status: 'manual',
+      },
+    ],
+  };
+};
+
+const motionDefinitionFromJoint = (joint: KinematicJoint, now = new Date().toISOString()): FunctionalComponentMotionDefinition => {
+  const dynamic = joint.type !== 'fixed';
+  const twoEnd = joint.motionProfile === 'fixed-origin-lift';
+  const fixedEndpoint = {
+    id: 'fixed_end',
+    name: 'Fixed end',
+    role: 'fixed' as const,
+    position: joint.origin.position,
+    axis: joint.axis,
+  };
+  const movingEndpoint = {
+    id: 'moving_end',
+    name: 'Moving end',
+    role: 'moving' as const,
+    position: joint.drivenPoint ?? [joint.origin.position[0] + 1, joint.origin.position[1], joint.origin.position[2]] as Vector3Tuple,
+    axis: joint.axis,
+  };
+  const singleEndpoint = {
+    id: 'end_a',
+    name: 'Single moving end',
+    role: 'single' as const,
+    position: joint.origin.position,
+    axis: joint.axis,
+  };
+
+  return {
+    version: 1,
+    static: !dynamic,
+    endpointMode: twoEnd ? 'two-end' : 'single',
+    activeEndpointId: twoEnd ? movingEndpoint.id : singleEndpoint.id,
+    endpoints: twoEnd ? [fixedEndpoint, movingEndpoint] : [singleEndpoint],
+    movements: dynamic
+      ? [
+          {
+            id: `${joint.id}_movement`,
+            endpointId: twoEnd ? movingEndpoint.id : singleEndpoint.id,
+            kind: joint.type === 'prismatic' && joint.motionProfile !== 'rotation-around-origin' ? 'translation' : 'rotation',
+            axis: joint.axis,
+            plane: joint.motionPlane ?? 'xy',
+            limits: {
+              lower: joint.limits?.lower ?? -0.8,
+              upper: joint.limits?.upper ?? 0.8,
+            },
+            testValue: 0,
+          },
+        ]
+      : [],
+    updatedAt: now,
+  };
+};
+
+const syncComponentMotionFromGraph = (component: FunctionalComponent | undefined, graph: KinematicGraph | undefined): FunctionalComponent | undefined => {
+  if (!component || !graph?.joints.length) return component;
+  const joint = graph.joints.find((item) => item.status !== 'rejected') ?? graph.joints[0];
+  return {
+    ...component,
+    mechanicalProperties: {
+      ...component.mechanicalProperties,
+      movable: joint.type !== 'fixed',
+      preferredJointType: joint.type,
+    },
+    kinematicGraph: graph,
+    motionDefinition: motionDefinitionFromJoint(joint),
+    metadata: {
+      ...component.metadata,
+      motionUpdatedAt: new Date().toISOString(),
+    },
+  };
+};
+
 const cleanPartToken = (value: string) =>
   value
     .replace(/\.(glb|fbx|dae|obj|3ds)$/i, '')
@@ -346,6 +496,25 @@ const makePartCode = (category: string, className: string, index: number) =>
   `${category.slice(0, 3)}-${className.slice(0, 3)}-${String(index + 1).padStart(4, '0')}`.toUpperCase().replace(/[^A-Z0-9-]/g, '');
 
 const cloneGeometry = <T extends GeometryDefinition>(geometry: T): T => JSON.parse(JSON.stringify(geometry)) as T;
+
+const mapKinematicGraphToStoredPart = (
+  graph: KinematicGraph,
+  mapPoint: (point: Vector3Tuple) => Vector3Tuple,
+  mapDirection: (direction: Vector3Tuple) => Vector3Tuple,
+): KinematicGraph => ({
+  ...graph,
+  parts: graph.parts.map((part) => ({
+    ...part,
+    bounds: { ...part.bounds, center: mapPoint(part.bounds.center) },
+  })),
+  joints: graph.joints.map((joint) => ({
+    ...joint,
+    origin: { ...joint.origin, position: mapPoint(joint.origin.position) },
+    drivenPoint: joint.drivenPoint ? mapPoint(joint.drivenPoint) : undefined,
+    axis: mapDirection(joint.axis),
+    axis2: joint.axis2 ? mapDirection(joint.axis2) : undefined,
+  })),
+});
 
 const cloneStoredNode = (node: SceneNode, index = 0): SceneNode => ({
   ...node,
@@ -451,6 +620,63 @@ const blobToDataUrl = (blob: Blob) =>
     reader.readAsDataURL(blob);
   });
 
+type WorkspaceContextMenu = ViewportContextMenuEvent & {
+  mode?: 'joint' | 'part' | 'object';
+};
+
+type ViewportJointTestMode = 'movement' | 'full-range';
+type ViewportInspectionPhase = 'idle' | 'testing' | 'awaiting-confirmation' | 'repairing' | 'complete' | 'stopped';
+type ViewportRepairMode = 'root' | 'axis' | 'pivot' | 'type' | 'limits' | 'parent-child' | 'coupling';
+type MotionPlane = NonNullable<KinematicJoint['motionPlane']>;
+
+const rotationPlaneForAxis = (axis: [number, number, number]): MotionPlane => {
+  const absolute = axis.map(Math.abs);
+  if (absolute[0] >= absolute[1] && absolute[0] >= absolute[2]) return 'yz';
+  if (absolute[1] >= absolute[0] && absolute[1] >= absolute[2]) return 'xz';
+  return 'xy';
+};
+
+const defaultPlaneForLinearAxis = (axis: [number, number, number]): MotionPlane => (Math.abs(axis[2]) > Math.abs(axis[0]) && Math.abs(axis[2]) > Math.abs(axis[1]) ? 'xz' : 'xy');
+
+const axisPatchForJoint = (joint: KinematicJoint | undefined, axis: [number, number, number]): Partial<KinematicJoint> => {
+  const rotational = !joint || joint.type === 'revolute' || joint.type === 'continuous' || joint.motionProfile === 'rotation-around-origin';
+  return {
+    axis,
+    motionPlane: rotational ? rotationPlaneForAxis(axis) : (joint.motionPlane ?? defaultPlaneForLinearAxis(axis)),
+  };
+};
+
+const centeredAxisPatchForPiece = (node: SceneNode | undefined, joint: KinematicJoint | undefined, axis: [number, number, number]): Partial<KinematicJoint> => ({
+  ...axisPatchForJoint(joint, axis),
+  origin: {
+    position: node && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : (joint?.origin.position ?? [0, 0, 0]),
+    rotation: [0, 0, 0, 1],
+  },
+});
+
+type ViewportInspectionState = {
+  phase: ViewportInspectionPhase;
+  nodeId?: string;
+  jointId?: string;
+  mode?: ViewportJointTestMode;
+  sequence?: number[];
+  sequenceIndex?: number;
+  inspectedJointIds?: string[];
+  inspectIndex?: number;
+  correctJointIds: string[];
+  attentionJointIds: string[];
+  skippedJointIds: string[];
+  repairMode?: ViewportRepairMode;
+  message: string;
+};
+
+type PieceAnalysisState = {
+  sourceDocument: AssetDocument;
+  nodeId: string;
+  sourceNodeId?: string;
+  sourceObjectName?: string;
+};
+
 export const App = () => {
   const [document, setDocument] = useState<AssetDocument>(loadInitialProject);
   const [past, setPast] = useState<AssetDocument[]>([]);
@@ -459,7 +685,7 @@ export const App = () => {
   const [partEditMode, setPartEditMode] = useState<PartEditMode>('free');
   const [selectedParts, setSelectedParts] = useState<ImportedPartSelection[]>([]);
   const [warehouseMenu, setWarehouseMenu] = useState<{ itemId: string; x: number; y: number } | undefined>();
-  const [workspaceMenu, setWorkspaceMenu] = useState<{ nodeId: string; x: number; y: number } | undefined>();
+  const [workspaceMenu, setWorkspaceMenu] = useState<WorkspaceContextMenu | undefined>();
   const [activeView, setActiveView] = useState<'workspace' | 'warehouse'>('workspace');
   const [pendingWorkspaceNodeIds, setPendingWorkspaceNodeIds] = useState<string[]>([]);
   const [snapEnabled, setSnapEnabled] = useState(false);
@@ -474,11 +700,23 @@ export const App = () => {
   const [nativeProjectPath, setNativeProjectPath] = useState<string | undefined>();
   const [demoMotionNodeId, setDemoMotionNodeId] = useState<string | undefined>();
   const [motionTrainer, setMotionTrainer] = useState<MotionTrainerState | undefined>();
+  const [pieceAnalysis, setPieceAnalysis] = useState<PieceAnalysisState | undefined>();
   const [kinematicEditTarget, setKinematicEditTarget] = useState<KinematicEditTarget | undefined>();
+  const [viewportNotice, setViewportNotice] = useState<string | undefined>();
+  const [viewportInspection, setViewportInspection] = useState<ViewportInspectionState>({
+    phase: 'idle',
+    correctJointIds: [],
+    attentionJointIds: [],
+    skippedJointIds: [],
+    message: 'Select a joint to inspect it.',
+  });
   const [warehouseStorageInfo, setWarehouseStorageInfo] = useState<WarehouseStorageInfo>({ items: 0, usageBytes: 0, quotaBytes: 0, savedItems: [] });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const glbInputRef = useRef<HTMLInputElement | null>(null);
   const warehouseInputRef = useRef<HTMLInputElement | null>(null);
+  const viewportTestTimerRef = useRef<number | undefined>();
+  const viewportNoticeTimerRef = useRef<number | undefined>();
+  const kinematicEditSnapshotRef = useRef<{ nodeId: string; jointId: string; joint: KinematicJoint } | undefined>();
 
   const selectedNode = useMemo(
     () => document.nodes.find((node) => node.id === document.selectedNodeId),
@@ -506,11 +744,20 @@ export const App = () => {
     () => (selectedNode ? selectedParts.filter((part) => part.nodeId === selectedNode.id) : []),
     [selectedNode, selectedParts],
   );
+
+  const showViewportNotice = (message: string, durationMs = 4200) => {
+    window.clearTimeout(viewportNoticeTimerRef.current);
+    setViewportNotice(message);
+    if (durationMs > 0) {
+      viewportNoticeTimerRef.current = window.setTimeout(() => setViewportNotice(undefined), durationMs);
+    }
+  };
   const activeKinematicEditTarget = useMemo<KinematicEditTarget | undefined>(() => {
     if (!kinematicEditTarget) return undefined;
     const node = document.nodes.find((item) => item.id === kinematicEditTarget.nodeId);
-    if (!node || node.geometry.kind !== 'imported-model') return undefined;
-    const graph = graphFromImportedGeometry(node.geometry);
+    if (!node) return undefined;
+    const graph = graphFromGeometry(node.geometry);
+    if (!graph) return undefined;
     const joint = graph.joints.find((item) => item.id === kinematicEditTarget.jointId);
     if (!joint) return undefined;
     const partById = new Map(graph.parts.map((part) => [part.id, part]));
@@ -647,9 +894,26 @@ export const App = () => {
   useEffect(() => {
     const runtimeWindow = window as Window & {
       __assetForgeDocument?: AssetDocument;
+      __assetForgeSelectedParts?: ImportedPartSelection[];
       __assetForgeCreateLegacyWarehouseItem?: () => boolean;
+      __assetForgeSelectFirstTwoKinematicParts?: () => boolean;
     };
     runtimeWindow.__assetForgeDocument = document;
+    runtimeWindow.__assetForgeSelectedParts = selectedParts;
+    runtimeWindow.__assetForgeSelectFirstTwoKinematicParts = () => {
+      const imported = document.nodes.find((node) => node.geometry.kind === 'imported-model');
+      if (!imported || imported.geometry.kind !== 'imported-model') return false;
+      const graph = graphFromImportedGeometry(imported.geometry);
+      const objectNames = graph.parts.flatMap((part) => part.meshObjectIds).filter(Boolean);
+      const uniqueNames = [...new Set(objectNames)].slice(0, 2);
+      if (uniqueNames.length < 2) return false;
+      setTool('parts');
+      setPartEditMode('free');
+      setDocument((current) => ({ ...current, selectedNodeId: imported.id }));
+      setSelectedParts(uniqueNames.map((objectName) => ({ nodeId: imported.id, objectName })));
+      setStatus('2 parts selected');
+      return true;
+    };
     runtimeWindow.__assetForgeCreateLegacyWarehouseItem = () => {
       const imported = document.nodes.find((node) => node.geometry.kind === 'imported-model');
       if (!imported || imported.geometry.kind !== 'imported-model') return false;
@@ -683,7 +947,7 @@ export const App = () => {
       setStatus('Legacy warehouse item created');
       return true;
     };
-  }, [document]);
+  }, [document, selectedParts]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -691,7 +955,13 @@ export const App = () => {
       if (target?.tagName === 'INPUT') return;
 
       const key = event.key.toLowerCase();
-      if ((event.ctrlKey || event.metaKey) && key === 'z') {
+      if (key === 'escape') {
+        event.preventDefault();
+        setWorkspaceMenu(undefined);
+        setWarehouseMenu(undefined);
+        if (viewportInspection.phase === 'testing') stopViewportJointTest();
+        else if (kinematicEditTarget) cancelActiveKinematicEdit();
+      } else if ((event.ctrlKey || event.metaKey) && key === 'z') {
         event.preventDefault();
         undo();
       } else if ((event.ctrlKey || event.metaKey) && (key === 'y' || (event.shiftKey && key === 'z'))) {
@@ -759,6 +1029,21 @@ export const App = () => {
     (nodeId?: string) => {
       setDocument((current) => ({ ...current, selectedNodeId: nodeId }));
       setSelectedParts([]);
+      if (!nodeId) {
+        setWorkspaceMenu(undefined);
+        setKinematicEditTarget(undefined);
+        setViewportInspection((current) => ({
+          ...current,
+          phase: 'idle',
+          nodeId: undefined,
+          jointId: undefined,
+          repairMode: undefined,
+          sequence: undefined,
+          sequenceIndex: undefined,
+          message: 'Selection cleared. Choose another piece or joint.',
+        }));
+        showViewportNotice('Selection cleared. You can select another piece now.', 2600);
+      }
       setStatus(nodeId ? 'Object selected' : 'Selection cleared');
     },
     [],
@@ -1046,8 +1331,48 @@ export const App = () => {
     const category = inferPartCategory(node.geometry.assetName, objectName);
     const className = inferPartClassName(objectName);
     const now = new Date().toISOString();
-    const independentGeometry = await createIndependentWarehousePartGeometry(node.geometry, node.material, objectName);
+    const independentPart = await createIndependentWarehousePartGeometry(node.geometry, node.material, objectName);
+    const independentGeometry = independentPart.geometry;
     const componentId = functionalComponentId(node.geometry.assetName, objectName);
+    const cleanComponentGraph = createStandalonePieceGraph(componentId, cleanPartToken(objectName), objectName, independentGeometry.normalizedBounds);
+    const preservePieceMotion = Boolean(node.geometry.isIsolatedFunctionalComponent || node.geometry.functionalComponent?.motionDefinition);
+    const componentGraph =
+      preservePieceMotion && node.geometry.kinematicGraph
+        ? mapKinematicGraphToStoredPart(node.geometry.kinematicGraph, independentPart.sourcePointToStoredPoint, independentPart.sourceDirectionToStoredDirection)
+        : cleanComponentGraph;
+    const baseComponent =
+      preservePieceMotion && node.geometry.functionalComponent
+        ? node.geometry.functionalComponent
+        : buildFunctionalComponent({
+            id: componentId,
+            name: cleanPartToken(objectName),
+            category,
+            className,
+            sourceAssetName: node.geometry.assetName,
+            sourceObjectName: objectName,
+            bounds: independentGeometry.originalBounds,
+            material: { ...node.material },
+          });
+    const storedReferenceCenter = node.geometry.pieceReferenceCenter
+      ? { ...node.geometry.pieceReferenceCenter, position: independentPart.sourcePointToStoredPoint(node.geometry.pieceReferenceCenter.position) }
+      : undefined;
+    const syncedComponent = syncComponentMotionFromGraph(baseComponent, componentGraph);
+    const functionalComponent =
+      syncedComponent && storedReferenceCenter
+        ? {
+            ...syncedComponent,
+            origin: { ...syncedComponent.origin, position: storedReferenceCenter.position },
+            bounds: { ...syncedComponent.bounds, center: storedReferenceCenter.position },
+            metadata: { ...syncedComponent.metadata, pieceReferenceCenter: storedReferenceCenter },
+          }
+        : syncedComponent;
+    const geometryWithMotion = {
+      ...independentGeometry,
+      pieceReferenceCenter: storedReferenceCenter,
+      kinematicGraph: componentGraph,
+      kinematicState: node.geometry.kinematicState ?? createHomeKinematicState(componentGraph),
+      functionalComponent,
+    };
     const item: PartWarehousePartItem = {
       id: `part_${crypto.randomUUID().slice(0, 8)}`,
       itemType: 'part',
@@ -1058,19 +1383,9 @@ export const App = () => {
       sourceNodeId: node.id,
       sourceAssetName: node.geometry.assetName,
       objectName,
-      geometry: independentGeometry,
+      geometry: geometryWithMotion,
       material: { ...node.material },
-      functionalComponent: buildFunctionalComponent({
-        id: componentId,
-        name: cleanPartToken(objectName),
-        category,
-        className,
-        sourceAssetName: node.geometry.assetName,
-        sourceObjectName: objectName,
-        bounds: independentGeometry.originalBounds,
-        material: { ...node.material },
-        sourceGraph: node.geometry.kinematicGraph,
-      }),
+      functionalComponent,
       metadata: {
         sourceFormat: independentGeometry.kind,
         originalBounds: independentGeometry.originalBounds,
@@ -1107,6 +1422,21 @@ export const App = () => {
     const className = inferPartClassName(node.name);
     const now = new Date().toISOString();
     const componentId = functionalComponentId(node.geometry.assetName, node.name);
+    const componentGraph = node.geometry.kinematicGraph ?? createStandalonePieceGraph(componentId, node.name, node.name, node.geometry.normalizedBounds);
+    const baseComponent =
+      node.geometry.functionalComponent ??
+      buildFunctionalComponent({
+        id: componentId,
+        name: node.name,
+        category,
+        className,
+        sourceAssetName: node.geometry.assetName,
+        sourceObjectName: node.name,
+        bounds: node.geometry.originalBounds,
+        material: { ...node.material },
+        localTransform: node.transform,
+      });
+    const functionalComponent = syncComponentMotionFromGraph(baseComponent, componentGraph);
     const item: PartWarehousePartItem = {
       id: `part_${crypto.randomUUID().slice(0, 8)}`,
       itemType: 'part',
@@ -1117,19 +1447,14 @@ export const App = () => {
       sourceNodeId: node.id,
       sourceAssetName: node.geometry.assetName,
       objectName: node.name,
-      geometry: cloneGeometry(node.geometry),
+      geometry: {
+        ...cloneGeometry(node.geometry),
+        kinematicGraph: componentGraph,
+        kinematicState: node.geometry.kinematicState ?? createHomeKinematicState(componentGraph),
+        functionalComponent,
+      },
       material: { ...node.material },
-      functionalComponent: buildFunctionalComponent({
-        id: componentId,
-        name: node.name,
-        category,
-        className,
-        sourceAssetName: node.geometry.assetName,
-        sourceObjectName: node.name,
-        bounds: node.geometry.originalBounds,
-        material: { ...node.material },
-        localTransform: node.transform,
-      }),
+      functionalComponent,
       metadata: {
         sourceFormat: 'serialized-object',
         originalBounds: node.geometry.originalBounds,
@@ -1255,14 +1580,24 @@ export const App = () => {
     }
 
     let geometry = cloneGeometry(item.geometry);
+    const sourceGraph = item.itemType === 'part' ? item.functionalComponent?.kinematicGraph ?? item.geometry.kinematicGraph : undefined;
+    const sourceState = item.itemType === 'part' ? item.geometry.kinematicState ?? (sourceGraph ? createHomeKinematicState(sourceGraph) : undefined) : undefined;
     if (geometry.kind === 'imported-model') {
       setStatus('Preparing stored part for scene...');
       try {
-        geometry = await createIndependentWarehousePartGeometry(geometry, item.material, item.objectName);
+        geometry = (await createIndependentWarehousePartGeometry(geometry, item.material, item.objectName)).geometry;
       } catch {
         setStatus('Stored part has no visible geometry');
         return [];
       }
+    }
+    if (item.itemType === 'part' && geometry.kind === 'serialized-object') {
+      geometry = {
+        ...geometry,
+        kinematicGraph: sourceGraph,
+        kinematicState: sourceState,
+        functionalComponent: item.functionalComponent,
+      };
     }
 
     return [
@@ -1735,6 +2070,18 @@ export const App = () => {
     }
 
     if (node.geometry.kind === 'imported-model') {
+      if (node.geometry.isIsolatedFunctionalComponent || node.geometry.functionalComponent || node.geometry.isolatedObjectNames?.length === 1) {
+        const item = await buildWarehouseItem(node, node.geometry.isolatedObjectNames?.[0] ?? node.name, document.partWarehouse?.length ?? 0);
+        if (!item) return undefined;
+        return {
+          ...item,
+          metadata: {
+            ...item.metadata,
+            storageKey,
+            storageProjectId: document.metadata.id,
+          },
+        };
+      }
       return buildSceneAssemblyWarehouseItem([node], node.name, storageKey);
     }
 
@@ -1848,6 +2195,193 @@ export const App = () => {
       'Workspace assembly stored',
     );
     await saveWarehouseItemsPermanent([item], 'workspace assembly');
+  };
+
+  const enterPieceAnalysis = async (event: ViewportContextMenuEvent) => {
+    const activePieceAnalysis = pieceAnalysis && document.nodes.some((node) => node.id === pieceAnalysis.nodeId);
+    if (activePieceAnalysis) {
+      setStatus('Already in piece mode. Use right click and Exit piece mode to leave.');
+      showViewportNotice('Piece mode stays active until you choose Exit piece mode from the right-click menu.', 5200);
+      return;
+    }
+    if (pieceAnalysis) setPieceAnalysis(undefined);
+    const sourceNode = document.nodes.find((node) => node.id === event.nodeId);
+    if (!sourceNode || !kinematicGeometryWithGraph(sourceNode.geometry)) {
+      setStatus('This object cannot enter piece analysis');
+      return;
+    }
+
+    const sourceObjectName = sourceNode.geometry.kind === 'imported-model' ? event.objectName ?? sourceNode.geometry.isolatedObjectNames?.[0] ?? sourceNode.name : sourceNode.name;
+    const name = cleanPartToken(sourceObjectName);
+    const componentId = functionalComponentId(sourceNode.geometry.kind === 'imported-model' ? sourceNode.geometry.assetName : sourceNode.geometry.assetName, sourceObjectName);
+    const graph = createStandalonePieceGraph(componentId, name, sourceObjectName, sourceNode.geometry.normalizedBounds, pieceReferenceCenter(sourceNode.geometry));
+    const component = syncComponentMotionFromGraph(
+      buildFunctionalComponent({
+        id: componentId,
+        name,
+        category: inferPartCategory(sourceNode.name, sourceObjectName),
+        className: inferPartClassName(sourceObjectName),
+        sourceAssetName: sourceNode.geometry.kind === 'imported-model' ? sourceNode.geometry.assetName : sourceNode.geometry.assetName,
+        sourceObjectName,
+        bounds: sourceNode.geometry.normalizedBounds,
+        material: { ...sourceNode.material },
+      }),
+      graph,
+    );
+
+    const geometry =
+      sourceNode.geometry.kind === 'imported-model'
+        ? {
+            ...cloneGeometry(sourceNode.geometry),
+            joints: [],
+            validatedMotions: [],
+            freePartTransforms: [],
+            isolatedObjectNames: [sourceObjectName],
+            kinematicGraph: graph,
+            kinematicState: createHomeKinematicState(graph),
+            functionalComponent: component,
+            isIsolatedFunctionalComponent: true,
+          }
+        : {
+            ...cloneGeometry(sourceNode.geometry),
+            kinematicGraph: graph,
+            kinematicState: createHomeKinematicState(graph),
+            functionalComponent: component,
+          };
+
+    const now = new Date().toISOString();
+    const analysisNode: SceneNode = {
+      id: `piece_analysis_${crypto.randomUUID().slice(0, 8)}`,
+      name,
+      geometry,
+      material: { ...sourceNode.material },
+      transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      visible: true,
+      locked: false,
+      createdAt: now,
+    };
+
+    setPieceAnalysis({ sourceDocument: document, nodeId: analysisNode.id, sourceNodeId: sourceNode.id, sourceObjectName });
+    setWorkspaceMenu(undefined);
+    setSelectedParts([]);
+    setDocument(touch({ ...document, nodes: [analysisNode], selectedNodeId: analysisNode.id }));
+    setTool('select');
+    const jointId = graph.joints[0]?.id;
+    if (jointId) {
+      setViewportInspection((current) => ({
+        ...current,
+        phase: 'repairing',
+        nodeId: analysisNode.id,
+        jointId,
+        repairMode: 'root',
+        message: 'Piece analysis mode. Define whether the piece is static or dynamic, then choose one-end or two-end movement.',
+      }));
+      setKinematicEditTarget({
+        nodeId: analysisNode.id,
+        jointId,
+        mode: 'show-joint',
+        origin: graph.joints[0].origin.position,
+        axis: graph.joints[0].axis,
+        focusKey: `piece-analysis-${jointId}-${Date.now()}`,
+      });
+      setStatus('Showing isolated piece reference axes');
+    }
+    showViewportNotice('Piece analysis mode: only this piece is visible. Previous model movements were cleared.', 6500);
+  };
+
+  const exitPieceAnalysis = async (saveBeforeExit = true) => {
+    if (!pieceAnalysis) return;
+    const analysisNode = document.nodes.find((node) => node.id === pieceAnalysis.nodeId);
+    let nextSourceDocument = pieceAnalysis.sourceDocument;
+
+    if (saveBeforeExit && analysisNode) {
+      const item = await buildWorkspaceNodeWarehouseItem(analysisNode);
+      if (item) {
+        nextSourceDocument = {
+          ...nextSourceDocument,
+          partWarehouse: mergeWarehouseItems(nextSourceDocument.partWarehouse ?? [], [item]),
+          selectedWarehouseItemId: item.id,
+        };
+      }
+    }
+
+    setPieceAnalysis(undefined);
+    setWorkspaceMenu(undefined);
+    setKinematicEditTarget(undefined);
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'idle',
+      nodeId: undefined,
+      jointId: undefined,
+      repairMode: undefined,
+      message: saveBeforeExit ? 'Piece motion metadata stored in the warehouse list.' : 'Piece analysis closed.',
+    }));
+    setDocument(touch(nextSourceDocument));
+    setStatus(saveBeforeExit ? 'Piece mode closed and metadata stored' : 'Piece mode closed');
+  };
+
+  const preparePieceMotionCorrection = (nodeId: string) => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    const graph = node ? graphFromGeometry(node.geometry) : undefined;
+    const joint = graph?.joints[0];
+    if (!node || !graph || !joint) return;
+    setWorkspaceMenu(undefined);
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'repairing',
+      nodeId,
+      jointId: joint.id,
+      repairMode: 'root',
+      message: 'Define static/dynamic, one-end/two-end, then axis and limits. The piece will not move until Test Movement.',
+    }));
+    startKinematicEditForNode(nodeId, joint.id, 'show-joint');
+  };
+
+  const setPieceStaticMode = (nodeId: string, jointId: string, isStatic: boolean) => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    const center = node && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : ([0, 0, 0] as Vector3Tuple);
+    updateKinematicGraphForNode(
+      nodeId,
+      (graph) =>
+        updateJoint(graph, jointId, {
+          type: isStatic ? 'fixed' : 'revolute',
+          motionProfile: isStatic ? undefined : 'rotation-around-origin',
+          motionPlane: isStatic ? undefined : 'xy',
+          origin: { position: center, rotation: [0, 0, 0, 1] },
+          limits: isStatic ? undefined : { lower: -0.8, upper: 0.8 },
+        }),
+      isStatic ? 'Piece marked static' : 'Piece marked dynamic',
+      true,
+    );
+  };
+
+  const setPieceEndpointMode = (nodeId: string, jointId: string, endpointMode: 'single' | 'two-end') => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    const joint = node ? graphFromGeometry(node.geometry)?.joints.find((item) => item.id === jointId) : undefined;
+    if (!joint) return;
+    const center = node && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : joint.origin.position;
+    if (endpointMode === 'two-end') {
+      updateKinematicJointForNode(nodeId, jointId, {
+        type: 'prismatic',
+        motionProfile: 'fixed-origin-lift',
+        motionPlane: joint.motionPlane ?? 'xy',
+        origin: { position: center, rotation: [0, 0, 0, 1] },
+        drivenPoint: joint.drivenPoint ?? [center[0] + 1, center[1], center[2]],
+        limits: joint.limits ?? { lower: -0.5, upper: 0.5 },
+      });
+      startKinematicEditForNode(nodeId, jointId, 'pick-origin');
+      return;
+    }
+
+    updateKinematicJointForNode(nodeId, jointId, {
+      type: 'revolute',
+      motionProfile: 'rotation-around-origin',
+      motionPlane: joint.motionPlane ?? rotationPlaneForAxis(joint.axis),
+      origin: { position: center, rotation: [0, 0, 0, 1] },
+      drivenPoint: undefined,
+      limits: joint.limits ?? { lower: -0.8, upper: 0.8 },
+    });
+    startKinematicEditForNode(nodeId, jointId, 'show-joint');
   };
 
   const updateWarehouseItemFromSelection = async (copy: boolean) => {
@@ -2242,8 +2776,9 @@ export const App = () => {
 
   const updateKinematicGraphForNode = (
     nodeId: string,
-    updater: (graph: KinematicGraph, geometry: ImportedModelGeometry) => KinematicGraph,
+    updater: (graph: KinematicGraph, geometry: KinematicSceneGeometry) => KinematicGraph,
     nextStatus: string,
+    resetPose = false,
   ) => {
     setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
     setDocument((current) => {
@@ -2251,18 +2786,22 @@ export const App = () => {
         ...current,
         selectedNodeId: nodeId,
         nodes: current.nodes.map((node) => {
-          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
-          const graph = updater(graphFromImportedGeometry(node.geometry), node.geometry);
-          const state = node.geometry.kinematicState ?? createHomeKinematicState(graph);
+          if (node.id !== nodeId || !kinematicGeometryWithGraph(node.geometry)) return node;
+          const baseGraph = graphFromGeometry(node.geometry) ?? createStandalonePieceGraph(`component_${node.id}`, node.name, node.name, node.geometry.normalizedBounds);
+          const graph = updater(baseGraph, node.geometry);
+          const homeState = createHomeKinematicState(graph);
+          const state = resetPose ? homeState : (node.geometry.kinematicState ?? homeState);
+          const functionalComponent = syncComponentMotionFromGraph(node.geometry.functionalComponent, graph);
           return {
             ...node,
             geometry: {
               ...node.geometry,
               kinematicGraph: graph,
               kinematicState: {
-                homeJointValues: { ...createHomeKinematicState(graph).homeJointValues, ...state.homeJointValues },
-                jointValues: { ...createHomeKinematicState(graph).jointValues, ...state.jointValues },
+                homeJointValues: { ...homeState.homeJointValues, ...state.homeJointValues },
+                jointValues: resetPose ? { ...homeState.jointValues } : { ...homeState.jointValues, ...state.jointValues },
               },
+              functionalComponent,
             },
           };
         }),
@@ -2281,8 +2820,9 @@ export const App = () => {
         ...current,
         selectedNodeId: nodeId,
         nodes: current.nodes.map((node) => {
-          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
-          const graph = graphFromImportedGeometry(node.geometry);
+          if (node.id !== nodeId || !kinematicGeometryWithGraph(node.geometry)) return node;
+          const graph = graphFromGeometry(node.geometry);
+          if (!graph) return node;
           return {
             ...node,
             geometry: {
@@ -2304,8 +2844,9 @@ export const App = () => {
         ...current,
         selectedNodeId: nodeId,
         nodes: current.nodes.map((node) => {
-          if (node.id !== nodeId || node.geometry.kind !== 'imported-model') return node;
-          const graph = graphFromImportedGeometry(node.geometry);
+          if (node.id !== nodeId || !kinematicGeometryWithGraph(node.geometry)) return node;
+          const graph = graphFromGeometry(node.geometry);
+          if (!graph) return node;
           return {
             ...node,
             geometry: {
@@ -2322,21 +2863,118 @@ export const App = () => {
   };
 
   const updateKinematicJointForNode = (nodeId: string, jointId: string, patch: Partial<KinematicJoint>) => {
-    updateKinematicGraphForNode(nodeId, (graph) => updateJoint(graph, jointId, patch), 'Kinematic joint updated');
+    updateKinematicGraphForNode(nodeId, (graph) => updateJoint(graph, jointId, patch), 'Kinematic joint updated', true);
+    showViewportNotice('Joint definition updated. Press Test Movement to move the piece with the new definition.', 5200);
+  };
+
+  const applyPieceReferenceCenterEstimate = (event: PieceReferenceCenterEstimateEvent) => {
+    const referenceCenter: PieceReferenceCenter = {
+      position: event.position,
+      method: event.method,
+      confidence: event.confidence,
+      triangleCount: event.triangleCount,
+      updatedAt: new Date().toISOString(),
+    };
+    setDocument((current) => {
+      const nextDocument = touch({
+        ...current,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== event.nodeId || !kinematicGeometryWithGraph(node.geometry) || node.geometry.pieceReferenceCenter) return node;
+          const graph = graphFromGeometry(node.geometry);
+          if (!graph) return node;
+          const centeredGraph: KinematicGraph = {
+            ...graph,
+            parts: graph.parts.map((part) => ({
+              ...part,
+              bounds: { ...part.bounds, center: referenceCenter.position },
+              metadata: { ...part.metadata, pieceReferenceCenter: referenceCenter.position },
+            })),
+            joints: graph.joints.map((joint) => ({
+              ...joint,
+              origin: { position: referenceCenter.position, rotation: joint.origin.rotation },
+              evidence: [...joint.evidence, { type: 'geometry', score: referenceCenter.confidence, message: `Piece reference estimated from ${referenceCenter.triangleCount} mesh triangles using ${referenceCenter.method}.` }],
+            })),
+          };
+          const functionalComponent = node.geometry.functionalComponent
+            ? syncComponentMotionFromGraph(
+                {
+                  ...node.geometry.functionalComponent,
+                  origin: { ...node.geometry.functionalComponent.origin, position: referenceCenter.position },
+                  bounds: { ...node.geometry.functionalComponent.bounds, center: referenceCenter.position },
+                  metadata: { ...node.geometry.functionalComponent.metadata, pieceReferenceCenter: referenceCenter },
+                },
+                centeredGraph,
+              )
+            : undefined;
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              pieceReferenceCenter: referenceCenter,
+              kinematicGraph: centeredGraph,
+              kinematicState: createHomeKinematicState(centeredGraph),
+              functionalComponent,
+            },
+          };
+        }),
+      });
+      setIssues(validateProject(nextDocument));
+      return nextDocument;
+    });
+    setStatus(`Piece reference estimated from ${event.triangleCount} triangles`);
+    showViewportNotice(`Reference center calculated: ${event.method.replace('-', ' ')}. It is now the default pivot for this piece.`, 6200);
+  };
+
+  const persistManualPieceReferenceCenter = (nodeId: string, position: Vector3Tuple) => {
+    setDocument((current) =>
+      touch({
+        ...current,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId || node.geometry.kind !== 'imported-model' || !node.geometry.isIsolatedFunctionalComponent) return node;
+          const previous = node.geometry.pieceReferenceCenter;
+          const referenceCenter: PieceReferenceCenter = {
+            position,
+            method: 'manual',
+            confidence: 1,
+            triangleCount: previous?.triangleCount ?? 0,
+            updatedAt: new Date().toISOString(),
+          };
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              pieceReferenceCenter: referenceCenter,
+              functionalComponent: node.geometry.functionalComponent
+                ? {
+                    ...node.geometry.functionalComponent,
+                    origin: { ...node.geometry.functionalComponent.origin, position },
+                    bounds: { ...node.geometry.functionalComponent.bounds, center: position },
+                    metadata: { ...node.geometry.functionalComponent.metadata, pieceReferenceCenter: referenceCenter },
+                  }
+                : undefined,
+            },
+          };
+        }),
+      }),
+    );
+    markWorkspaceNodesPending([nodeId]);
   };
 
   const startKinematicEditForNode = (nodeId: string, jointId: string, mode: KinematicEditTarget['mode']) => {
     const node = document.nodes.find((item) => item.id === nodeId);
-    if (!node || node.geometry.kind !== 'imported-model') return;
-    const joint = graphFromImportedGeometry(node.geometry).joints.find((item) => item.id === jointId);
+    const graph = node ? graphFromGeometry(node.geometry) : undefined;
+    if (!node || !graph) return;
+    const joint = graph.joints.find((item) => item.id === jointId);
     if (!joint) return;
     setTool('select');
+    kinematicEditSnapshotRef.current = { nodeId, jointId, joint: JSON.parse(JSON.stringify(joint)) as KinematicJoint };
     setKinematicEditTarget({
       nodeId,
       jointId,
       mode,
       origin: joint.origin.position,
       axis: joint.axis,
+      drivenPoint: joint.drivenPoint,
       axisPointA: mode === 'pick-axis-b' ? kinematicEditTarget?.axisPointA : undefined,
       focusKey: `${mode}-${jointId}-${Date.now()}`,
     });
@@ -2345,14 +2983,34 @@ export const App = () => {
         ? 'Showing joint in viewport'
         : mode === 'pick-origin'
           ? 'Pick joint origin in viewport'
+          : mode === 'pick-driven-point'
+            ? 'Pick moving point in viewport'
           : mode === 'axis-gizmo'
             ? 'Drag axis gizmo in viewport'
             : 'Pick axis point in viewport',
+    );
+    showViewportNotice(
+      mode === 'show-joint'
+        ? 'Pivot red. X red, Y green, Z blue. Yellow is the movement axis.'
+        : mode === 'pick-origin'
+          ? 'Pick the fixed pivot point on the model surface.'
+          : mode === 'pick-driven-point'
+            ? 'Pick the moving end of the piece.'
+            : mode === 'axis-gizmo'
+              ? 'Drag the yellow handle. X red, Y green and Z blue are the reference axes.'
+              : mode === 'pick-axis-a'
+                ? 'Pick point A on the model. Then pick point B to define the movement axis.'
+                : 'Pick point B. Axis will be normalized from A to B.',
+      mode === 'show-joint' ? 5200 : 0,
     );
   };
 
   const handleKinematicPointPick = (event: KinematicPointPickEvent) => {
     if (event.mode === 'pick-origin') {
+      const node = document.nodes.find((item) => item.id === event.nodeId);
+      const graph = node ? graphFromGeometry(node.geometry) : undefined;
+      const joint = graph?.joints.find((item) => item.id === event.jointId);
+      const needsDrivenPoint = joint?.motionProfile === 'fixed-origin-lift';
       updateKinematicGraphForNode(
         event.nodeId,
         (graph) =>
@@ -2365,7 +3023,58 @@ export const App = () => {
           }),
         'Joint origin picked',
       );
+      if (pieceAnalysis?.nodeId === event.nodeId) {
+        persistManualPieceReferenceCenter(event.nodeId, event.point);
+        showViewportNotice('Manual piece reference center saved. New movements will use this pivot.', 5200);
+      }
+      if (needsDrivenPoint) {
+        setKinematicEditTarget({
+          nodeId: event.nodeId,
+          jointId: event.jointId,
+          mode: 'pick-driven-point',
+          origin: event.point,
+          axis: joint.axis,
+          drivenPoint: joint.drivenPoint,
+          focusKey: `pick-driven-${event.jointId}-${Date.now()}`,
+        });
+        setStatus('Pick moving point');
+        showViewportNotice('Fixed point saved. Now click the moving end of the piece.', 0);
+      } else if (pieceAnalysis?.nodeId === event.nodeId) {
+        setKinematicEditTarget({
+          nodeId: event.nodeId,
+          jointId: event.jointId,
+          mode: 'show-joint',
+          origin: event.point,
+          axis: joint?.axis ?? [0, 0, 1],
+          focusKey: `piece-reference-${event.jointId}-${Date.now()}`,
+        });
+        kinematicEditSnapshotRef.current = undefined;
+      } else {
+        setKinematicEditTarget(undefined);
+        kinematicEditSnapshotRef.current = undefined;
+      }
+      return;
+    }
+
+    if (event.mode === 'pick-driven-point') {
+      updateKinematicGraphForNode(
+        event.nodeId,
+        (graph) =>
+          updateJoint(graph, event.jointId, {
+            drivenPoint: event.point,
+            motionProfile: 'fixed-origin-lift',
+            type: 'prismatic',
+            evidence: [
+              ...(graph.joints.find((joint) => joint.id === event.jointId)?.evidence ?? []),
+              { type: 'manual', score: 1, message: `Moving end picked on ${event.objectName ?? 'model surface'}.` },
+            ],
+          }),
+        'Moving point picked',
+        true,
+      );
       setKinematicEditTarget(undefined);
+      kinematicEditSnapshotRef.current = undefined;
+      showViewportNotice('Fixed-point movement defined. Choose the yellow axis direction, then press Test Movement.', 6200);
       return;
     }
 
@@ -2402,6 +3111,7 @@ export const App = () => {
       'Two-point axis applied',
     );
     setKinematicEditTarget(undefined);
+    kinematicEditSnapshotRef.current = undefined;
   };
 
   const handleKinematicAxisChange = (event: KinematicAxisChangeEvent) => {
@@ -2411,6 +3121,224 @@ export const App = () => {
       'Axis gizmo adjusted',
     );
   };
+
+  const cancelActiveKinematicEdit = () => {
+    const snapshot = kinematicEditSnapshotRef.current;
+    if (snapshot) {
+      updateKinematicGraphForNode(snapshot.nodeId, (graph) => updateJoint(graph, snapshot.jointId, snapshot.joint), 'Kinematic edit cancelled');
+    }
+    kinematicEditSnapshotRef.current = undefined;
+    setKinematicEditTarget(undefined);
+    setViewportInspection((current) => ({ ...current, phase: current.phase === 'repairing' ? 'awaiting-confirmation' : current.phase, repairMode: undefined, message: 'Edit cancelled. Test the joint again when ready.' }));
+  };
+
+  const jointRange = (joint: KinematicJoint, fullRange = false) => {
+    if (joint.type === 'fixed') return { min: 0, max: 0 };
+    if (joint.type === 'prismatic') {
+      const lower = joint.limits?.lower ?? -1;
+      const upper = joint.limits?.upper ?? 1;
+      const amplitude = fullRange ? Math.min(Math.max(Math.abs(lower), Math.abs(upper)), 2) : Math.min((upper - lower) * 0.25, 0.35);
+      return { min: Math.max(lower, -Math.abs(amplitude)), max: Math.min(upper, Math.abs(amplitude)) };
+    }
+    const lower = joint.type === 'continuous' ? -Math.PI * 2 : (joint.limits?.lower ?? -Math.PI);
+    const upper = joint.type === 'continuous' ? Math.PI * 2 : (joint.limits?.upper ?? Math.PI);
+    const amplitude = fullRange ? Math.min(Math.max(Math.abs(lower), Math.abs(upper)), Math.PI * 0.9) : Math.min((upper - lower) * 0.25, Math.PI / 4);
+    return { min: Math.max(lower, -Math.abs(amplitude)), max: Math.min(upper, Math.abs(amplitude)) };
+  };
+
+  const startViewportJointTest = (nodeId: string, jointId: string, mode: ViewportJointTestMode = 'movement') => {
+    const node = document.nodes.find((item) => item.id === nodeId);
+    const graph = node ? graphFromGeometry(node.geometry) : undefined;
+    if (!node || !graph) return;
+    const joint = graph.joints.find((item) => item.id === jointId);
+    if (!joint || joint.type === 'fixed') {
+      setViewportInspection((current) => ({ ...current, phase: 'awaiting-confirmation', nodeId, jointId, message: 'Fixed joint. No relative movement to test.' }));
+      startKinematicEditForNode(nodeId, jointId, 'show-joint');
+      setWorkspaceMenu(undefined);
+      return;
+    }
+    const range = jointRange(joint, mode === 'full-range');
+    window.clearTimeout(viewportTestTimerRef.current);
+    resetKinematicPoseForNode(nodeId);
+    startKinematicEditForNode(nodeId, jointId, 'show-joint');
+    showViewportNotice('Focusing joint. Movement test starts after the view is readable.', 3200);
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'testing',
+      nodeId,
+      jointId,
+      mode,
+      sequence: [range.max, 0, range.min, 0],
+      sequenceIndex: -1,
+      repairMode: undefined,
+      message: `Testing ${joint.name}. Watch the movement and confirm whether it is mechanically correct.`,
+    }));
+    setWorkspaceMenu(undefined);
+  };
+
+  const stopViewportJointTest = () => {
+    window.clearTimeout(viewportTestTimerRef.current);
+    viewportTestTimerRef.current = undefined;
+    if (viewportInspection.nodeId) resetKinematicPoseForNode(viewportInspection.nodeId);
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'stopped',
+      sequence: undefined,
+      sequenceIndex: undefined,
+      message: 'STOP pressed. Movement stopped and mechanism returned to Home.',
+    }));
+  };
+
+  const confirmViewportJointCorrect = (nodeId = viewportInspection.nodeId, jointId = viewportInspection.jointId) => {
+    if (!nodeId || !jointId) return;
+    setWorkspaceMenu(undefined);
+    acceptKinematicJointForNode(nodeId, jointId);
+    resetKinematicPoseForNode(nodeId);
+    setStatus('Movement confirmed');
+    setViewportInspection((current) => {
+      const correctJointIds = [...new Set([...current.correctJointIds, jointId])];
+      const attentionJointIds = current.attentionJointIds.filter((id) => id !== jointId);
+      const isInspecting = current.inspectedJointIds?.length && current.inspectIndex !== undefined;
+      return {
+        ...current,
+        phase: isInspecting ? 'awaiting-confirmation' : 'idle',
+        correctJointIds,
+        attentionJointIds,
+        message: isInspecting ? 'Movement confirmed. Continue to the next joint.' : 'Movement confirmed.',
+      };
+    });
+  };
+
+  const markViewportJointIncorrect = (nodeId = viewportInspection.nodeId, jointId = viewportInspection.jointId) => {
+    if (!nodeId || !jointId) return;
+    setWorkspaceMenu(undefined);
+    setStatus('What is wrong?');
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'repairing',
+      nodeId,
+      jointId,
+      attentionJointIds: [...new Set([...current.attentionJointIds, jointId])],
+      repairMode: 'root',
+      message: 'What is wrong? Choose the closest problem and the platform will open the repair tool.',
+    }));
+  };
+
+  const applyViewportRepair = (repairMode: ViewportRepairMode) => {
+    const { nodeId, jointId } = viewportInspection;
+    if (!nodeId || !jointId) return;
+    const node = document.nodes.find((item) => item.id === nodeId);
+    const graph = node ? graphFromGeometry(node.geometry) : undefined;
+    if (!node || !graph) return;
+    const joint = graph.joints.find((item) => item.id === jointId);
+    if (!joint) return;
+    if (repairMode === 'pivot') startKinematicEditForNode(nodeId, jointId, 'pick-origin');
+    if (repairMode === 'axis') startKinematicEditForNode(nodeId, jointId, 'axis-gizmo');
+    if (repairMode === 'type') setKinematicEditTarget((current) => current ?? { nodeId, jointId, mode: 'show-joint', origin: joint.origin.position, axis: joint.axis });
+    if (repairMode === 'limits' || repairMode === 'parent-child' || repairMode === 'coupling') startKinematicEditForNode(nodeId, jointId, 'show-joint');
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'repairing',
+      repairMode,
+      message:
+        repairMode === 'pivot'
+          ? 'Select the correct pivot directly on the model.'
+          : repairMode === 'axis'
+            ? 'Use Axis Gizmo, Two-Point Axis, X, Y or Z, then test again.'
+            : 'Apply the correction, then test the joint again.',
+    }));
+    setWorkspaceMenu(undefined);
+  };
+
+  const startInspectAllJoints = (pendingOnly = false) => {
+    const node = selectedNode?.geometry.kind === 'imported-model' ? selectedNode : document.nodes.find((item) => item.geometry.kind === 'imported-model');
+    if (!node || node.geometry.kind !== 'imported-model') {
+      setStatus('Import a mechanical model first');
+      return;
+    }
+    const graph = graphFromImportedGeometry(node.geometry);
+    const jointIds = graph.joints
+      .filter((joint) => joint.status !== 'rejected' && joint.type !== 'fixed')
+      .filter((joint) => !pendingOnly || joint.status !== 'validated')
+      .map((joint) => joint.id);
+    if (!jointIds.length) {
+      setViewportInspection((current) => ({ ...current, phase: 'complete', nodeId: node.id, message: 'No pending inspectable joints.' }));
+      return;
+    }
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'idle',
+      nodeId: node.id,
+      jointId: jointIds[0],
+      inspectedJointIds: jointIds,
+      inspectIndex: 0,
+      correctJointIds: pendingOnly ? current.correctJointIds : [],
+      attentionJointIds: pendingOnly ? current.attentionJointIds : [],
+      skippedJointIds: [],
+      message: `Inspection 1/${jointIds.length}. Start by testing this joint.`,
+    }));
+    startKinematicEditForNode(node.id, jointIds[0], 'show-joint');
+  };
+
+  const nextInspectionJoint = () => {
+    const { inspectedJointIds, inspectIndex, nodeId } = viewportInspection;
+    if (!inspectedJointIds?.length || inspectIndex === undefined || !nodeId) return;
+    const nextIndex = inspectIndex + 1;
+    if (nextIndex >= inspectedJointIds.length) {
+      resetKinematicPoseForNode(nodeId);
+      setViewportInspection((current) => ({
+        ...current,
+        phase: 'complete',
+        inspectIndex: nextIndex,
+        message: `Mechanical Inspection Complete. Reviewed ${current.correctJointIds.length}, needs attention ${current.attentionJointIds.length}, skipped ${current.skippedJointIds.length}.`,
+      }));
+      return;
+    }
+    const nextJointId = inspectedJointIds[nextIndex];
+    setViewportInspection((current) => ({
+      ...current,
+      phase: 'idle',
+      jointId: nextJointId,
+      inspectIndex: nextIndex,
+      message: `Inspection ${nextIndex + 1}/${inspectedJointIds.length}. Test the highlighted joint.`,
+    }));
+    startKinematicEditForNode(nodeId, nextJointId, 'show-joint');
+  };
+
+  const skipInspectionJoint = () => {
+    const { jointId } = viewportInspection;
+    if (jointId) {
+      setViewportInspection((current) => ({ ...current, skippedJointIds: [...new Set([...current.skippedJointIds, jointId])], message: 'Joint skipped for later.' }));
+    }
+    window.setTimeout(nextInspectionJoint, 0);
+  };
+
+  useEffect(() => {
+    if (viewportInspection.phase !== 'testing' || !viewportInspection.nodeId || !viewportInspection.jointId || !viewportInspection.sequence) return undefined;
+    const index = viewportInspection.sequenceIndex ?? 0;
+    if (index < 0) {
+      viewportTestTimerRef.current = window.setTimeout(() => {
+        setViewportInspection((current) => ({ ...current, sequenceIndex: 0, message: 'Watch the movement. The yellow axis shows the joint direction.' }));
+      }, 900);
+      return () => window.clearTimeout(viewportTestTimerRef.current);
+    }
+    if (index >= viewportInspection.sequence.length) {
+      resetKinematicPoseForNode(viewportInspection.nodeId);
+      setViewportInspection((current) => ({
+        ...current,
+        phase: 'awaiting-confirmation',
+        sequence: undefined,
+        sequenceIndex: undefined,
+        message: 'Was this movement correct?',
+      }));
+      return undefined;
+    }
+    viewportTestTimerRef.current = window.setTimeout(() => {
+      setKinematicJointValueForNode(viewportInspection.nodeId!, viewportInspection.jointId!, viewportInspection.sequence![index]);
+      setViewportInspection((current) => ({ ...current, sequenceIndex: index + 1 }));
+    }, index === 0 ? 160 : 620);
+    return () => window.clearTimeout(viewportTestTimerRef.current);
+  }, [viewportInspection.phase, viewportInspection.nodeId, viewportInspection.jointId, viewportInspection.sequence, viewportInspection.sequenceIndex]);
 
   const acceptKinematicJointForNode = (nodeId: string, jointId: string) => {
     updateKinematicGraphForNode(nodeId, (graph) => acceptJointCandidate(graph, jointId), 'Kinematic joint accepted');
@@ -2424,8 +3352,22 @@ export const App = () => {
     updateKinematicGraphForNode(nodeId, (graph) => removeJoint(graph, jointId), 'Kinematic joint deleted');
   };
 
-  const createKinematicJointForNode = (nodeId: string, selectedObjectNames: string[]) => {
+  const createKinematicJointForNode = (
+    nodeId: string,
+    selectedObjectNames: string[],
+    options: {
+      origin?: [number, number, number];
+      drivenPoint?: [number, number, number];
+      preferredType?: KinematicJoint['type'];
+      motionProfile?: KinematicJoint['motionProfile'];
+      motionPlane?: KinematicJoint['motionPlane'];
+    } = {},
+  ) => {
     const cleanSelection = [...new Set(selectedObjectNames)].slice(0, 2);
+    let createdJointId: string | undefined;
+    let createdOrigin: [number, number, number] = [0, 0, 0];
+    let createdAxis: [number, number, number] = [0, 0, 1];
+    showViewportNotice(options.origin ? 'Creating joint at clicked point...' : 'Creating joint candidate...', 1600);
     updateKinematicGraphForNode(
       nodeId,
       (graph) => {
@@ -2454,28 +3396,65 @@ export const App = () => {
           nextParts.push(part);
           return part;
         };
-        const parent = cleanSelection[0] ? ensurePart(cleanSelection[0]) : graph.parts.find((part) => part.id === graph.rootPartId);
-        const child = cleanSelection[1] ? ensurePart(cleanSelection[1]) : nextParts.find((part) => part.id !== parent?.id && !part.static);
+        const rootPart = graph.parts.find((part) => part.id === graph.rootPartId);
+        const parent = cleanSelection.length > 1 && cleanSelection[0] ? ensurePart(cleanSelection[0]) : rootPart;
+        const child = cleanSelection[1] ? ensurePart(cleanSelection[1]) : cleanSelection[0] ? ensurePart(cleanSelection[0]) : nextParts.find((part) => part.id !== parent?.id && !part.static);
         if (!parent || !child || parent.id === child.id) return { ...graph, parts: nextParts };
         const jointId = `joint_manual_${crypto.randomUUID().slice(0, 8)}`;
+        const origin = options.origin ?? child.bounds.center ?? rootBounds?.center ?? [0, 0, 0];
         const joint: KinematicJoint = {
           id: jointId,
           name: `Joint ${cleanPartToken(parent.name)} to ${cleanPartToken(child.name)}`,
           parentPartId: parent.id,
           childPartId: child.id,
-          type: 'revolute',
-          origin: { position: rootBounds?.center ?? [0, 0, 0], rotation: [0, 0, 0, 1] },
+          type: options.preferredType ?? 'revolute',
+          origin: { position: origin, rotation: [0, 0, 0, 1] },
           axis: [0, 0, 1],
+          motionProfile: options.motionProfile ?? (options.preferredType === 'prismatic' ? 'linear-slide' : 'rotation-around-origin'),
+          motionPlane: options.motionPlane ?? 'xy',
+          drivenPoint: options.drivenPoint,
           limits: { lower: -Math.PI / 2, upper: Math.PI / 2 },
           source: 'manual',
           confidence: 1,
-          evidence: [{ type: 'manual', score: 1, message: 'Created in Kinematic Authoring from selected parts.' }],
+          evidence: [
+            {
+              type: 'manual',
+              score: 1,
+              message: options.origin
+                ? 'Created in Kinematic Authoring from clicked model point. This piece can have another joint at another clicked end.'
+                : 'Created in Kinematic Authoring from selected parts.',
+            },
+          ],
           status: 'candidate',
         };
+        createdJointId = jointId;
+        createdOrigin = joint.origin.position;
+        createdAxis = joint.axis;
         return createJoint({ ...graph, parts: nextParts }, joint);
       },
-      'Kinematic joint candidate created',
+      'Joint created. Set its movement or test the current proposal.',
+      true,
     );
+    if (createdJointId) {
+      setKinematicEditTarget({
+        nodeId,
+        jointId: createdJointId,
+        mode: 'show-joint',
+        origin: createdOrigin,
+        axis: createdAxis,
+        focusKey: `created-${createdJointId}-${Date.now()}`,
+      });
+      setViewportInspection((current) => ({
+        ...current,
+        nodeId,
+        jointId: createdJointId,
+        phase: 'idle',
+        message: 'Joint created. Test the movement or correct the pivot and axis.',
+      }));
+      showViewportNotice('Joint created. Pivot red, movement axis yellow. Right-click it to test.', 6200);
+    } else {
+      showViewportNotice('Joint was not created. Select two different parts first.', 5200);
+    }
   };
 
   const resetImportedJointPose = () => {
@@ -2553,6 +3532,20 @@ export const App = () => {
     errors: issues.filter((issue) => issue.severity === 'error').length,
     warnings: issues.filter((issue) => issue.severity === 'warning').length,
   };
+  const workspaceMenuNode = workspaceMenu ? document.nodes.find((node) => node.id === workspaceMenu.nodeId) : undefined;
+  const workspaceMenuGraph = workspaceMenuNode ? graphFromGeometry(workspaceMenuNode.geometry) : undefined;
+  const workspaceMenuJoint = workspaceMenuGraph?.joints.find((joint) => joint.id === workspaceMenu?.jointId);
+  const workspaceMenuJointIds = workspaceMenu?.jointIds?.length ? workspaceMenu.jointIds : workspaceMenuJoint ? [workspaceMenuJoint.id] : [];
+  const viewportActiveJoint = (() => {
+    if (!viewportInspection.nodeId || !viewportInspection.jointId) return undefined;
+    const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
+    return node ? graphFromGeometry(node.geometry)?.joints.find((joint) => joint.id === viewportInspection.jointId) : undefined;
+  })();
+  const viewportPieceReference = (() => {
+    if (!viewportInspection.nodeId) return undefined;
+    const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
+    return node && kinematicGeometryWithGraph(node.geometry) ? node.geometry.pieceReferenceCenter : undefined;
+  })();
 
   return (
     <main className="app-shell">
@@ -2658,6 +3651,18 @@ export const App = () => {
         </div>
 
         <div className="toolbar-group push-right">
+          <button title="Inspect All Joints starts a viewport-guided inspection and waits for Correct, Incorrect or Skip on each joint." disabled={!selectedNode || selectedNode.geometry.kind !== 'imported-model'} onClick={() => startInspectAllJoints(false)}>
+            <Play size={18} />
+            <span>Inspect All</span>
+          </button>
+          <button title="Inspect Pending reviews only joints that are not already validated." disabled={!selectedNode || selectedNode.geometry.kind !== 'imported-model'} onClick={() => startInspectAllJoints(true)}>
+            <Focus size={18} />
+            <span>Inspect Pending</span>
+          </button>
+          <button title="Home returns the whole mechanism to its defined home configuration." disabled={!selectedNode || selectedNode.geometry.kind !== 'imported-model'} onClick={() => selectedNode && resetKinematicPoseForNode(selectedNode.id)}>
+            <RotateCw size={18} />
+            <span>Home</span>
+          </button>
           <button title="Validate" onClick={validate}>
             <ShieldCheck size={18} />
             <span>Validate</span>
@@ -2773,6 +3778,7 @@ export const App = () => {
           tool={tool}
           partEditMode={partEditMode}
           snapEnabled={snapEnabled}
+          viewportNotice={viewportNotice}
           kinematicEditTarget={activeKinematicEditTarget}
           motionDemoNodeId={demoMotionNodeId}
           motionTrainingPreview={motionTrainingPreview}
@@ -2782,10 +3788,273 @@ export const App = () => {
           onJointPoseChange={setImportedJointMotionForNode}
           onKinematicPointPick={handleKinematicPointPick}
           onKinematicAxisChange={handleKinematicAxisChange}
+          onPieceReferenceCenterEstimate={applyPieceReferenceCenterEstimate}
           onPartSelectionChange={updatePartSelectionStatus}
-          onNodeContextMenu={({ nodeId, x, y }) => setWorkspaceMenu({ nodeId, x, y })}
+          onNodeContextMenu={(event) => {
+            const mode = event.jointId ? 'joint' : event.objectName ? 'part' : 'object';
+            setWorkspaceMenu({ ...event, mode });
+            if (event.jointId) {
+              startKinematicEditForNode(event.nodeId, event.jointId, 'show-joint');
+              setViewportInspection((current) => ({
+                ...current,
+                nodeId: event.nodeId,
+                jointId: event.jointId,
+                phase: current.phase === 'testing' ? current.phase : 'idle',
+                message: 'Select Test Movement to inspect this joint.',
+              }));
+            }
+          }}
+          onNodeDoubleClick={(event) => {
+            void enterPieceAnalysis(event);
+          }}
           onStatsChange={setStats}
         />
+
+        {(viewportInspection.phase !== 'idle' || Boolean(viewportInspection.inspectedJointIds?.length)) && viewportInspection.nodeId && viewportInspection.jointId && activeView === 'workspace' && (
+          <div className={`viewport-inspection-card phase-${viewportInspection.phase}`} onClick={(event) => event.stopPropagation()}>
+            <div>
+              <strong>{viewportActiveJoint?.name ?? 'Joint inspection'}</strong>
+              <span>
+                {viewportInspection.inspectedJointIds?.length && viewportInspection.inspectIndex !== undefined
+                  ? `Inspection ${Math.min(viewportInspection.inspectIndex + 1, viewportInspection.inspectedJointIds.length)}/${viewportInspection.inspectedJointIds.length}`
+                  : viewportActiveJoint?.type ?? 'joint'}
+              </span>
+            </div>
+            <p>{viewportInspection.message}</p>
+            {viewportInspection.phase === 'testing' && (
+              <button className="danger stop-button" title="STOP immediately stops the current automatic movement, cancels timers and returns the mechanism to Home." onClick={stopViewportJointTest}>
+                STOP
+              </button>
+            )}
+            {viewportInspection.phase === 'idle' && viewportInspection.inspectedJointIds?.length && (
+              <div className="viewport-inspection-actions">
+                <button title="Runs a safe movement sequence for this joint so you can visually verify whether its mechanical behavior is correct." onClick={() => startViewportJointTest(viewportInspection.nodeId!, viewportInspection.jointId!, 'movement')}>
+                  <Play size={15} />
+                  <span>Test Movement</span>
+                </button>
+                <button title="Skip this joint for later review." onClick={skipInspectionJoint}>
+                  <ArrowUp size={15} />
+                  <span>Skip</span>
+                </button>
+              </div>
+            )}
+            {viewportInspection.phase === 'awaiting-confirmation' && (
+              <div className="viewport-inspection-actions">
+                <button title="Confirms that the observed movement matches the intended mechanical behavior." onClick={() => confirmViewportJointCorrect()}>
+                  <Check size={15} />
+                  <span>Correct</span>
+                </button>
+                <button title="Starts a guided repair flow for this joint." onClick={() => markViewportJointIncorrect()}>
+                  <X size={15} />
+                  <span>Incorrect</span>
+                </button>
+                {viewportInspection.inspectedJointIds?.length && (
+                  <>
+                    <button title="Move to the next joint after confirming or skipping this one." onClick={nextInspectionJoint}>
+                      <ArrowDown size={15} />
+                      <span>Next</span>
+                    </button>
+                    <button title="Skip this joint for later review." onClick={skipInspectionJoint}>
+                      <ArrowUp size={15} />
+                      <span>Skip</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {viewportInspection.phase === 'repairing' && viewportInspection.repairMode === 'root' && (
+              <div className="viewport-repair-grid">
+                {pieceAnalysis?.nodeId === viewportInspection.nodeId && viewportInspection.jointId && (
+                  <>
+                    <div className="context-note axis-guide">
+                      Reference center: {viewportPieceReference ? `${viewportPieceReference.method.replace('-', ' ')} (${Math.round(viewportPieceReference.confidence * 100)}%)` : 'calculating from mesh geometry...'}. It is the red pivot and the common origin for this isolated piece.
+                    </div>
+                    <button title="Click the point that should be the piece reference center. This replaces the automatic estimate and is saved with the piece." onClick={() => startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'pick-origin')}>
+                      Correct reference center
+                    </button>
+                    <button title="This piece has no own movement. Its motion will come only from the assembly where it is mounted." onClick={() => setPieceStaticMode(viewportInspection.nodeId!, viewportInspection.jointId!, true)}>
+                      Static piece
+                    </button>
+                    <button title="This piece can move. Define one-end or two-end motion next." onClick={() => setPieceStaticMode(viewportInspection.nodeId!, viewportInspection.jointId!, false)}>
+                      Dynamic piece
+                    </button>
+                    <button title="Single movement point: the whole piece rotates or slides from one joint origin." onClick={() => setPieceEndpointMode(viewportInspection.nodeId!, viewportInspection.jointId!, 'single')}>
+                      One end
+                    </button>
+                    <button title="Two extremes: one fixed point and one moving point. Use it for links with a fixed end and a driven end." onClick={() => setPieceEndpointMode(viewportInspection.nodeId!, viewportInspection.jointId!, 'two-end')}>
+                      Two ends
+                    </button>
+                  </>
+                )}
+                {[
+                  ['pivot', 'Wrong pivot'],
+                  ['axis', 'Wrong axis'],
+                  ['type', 'Wrong movement type'],
+                  ['axis', 'Wrong direction'],
+                  ['limits', 'Wrong limits'],
+                  ['parent-child', 'Wrong moving part'],
+                  ['parent-child', 'Wrong parent/child relationship'],
+                  ['coupling', 'Coupled movement incorrect'],
+                ].map(([mode, label]) => (
+                  <button key={label} title={`Opens the guided repair tool for ${label}.`} onClick={() => applyViewportRepair(mode as ViewportRepairMode)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {viewportInspection.phase === 'repairing' && viewportInspection.repairMode && viewportInspection.repairMode !== 'root' && viewportInspection.nodeId && viewportInspection.jointId && (
+              <div className="viewport-repair-tools">
+                {viewportInspection.repairMode === 'axis' && (
+                  <>
+                    <div className="context-note axis-guide">X rojo, Y verde, Z azul. El eje amarillo es el eje activo del joint; cambiarlo no mueve la pieza hasta pulsar Test Movement.</div>
+                    <button title="Edit the axis directly with the 3D viewport gizmo." onClick={() => startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'axis-gizmo')}>Axis Gizmo</button>
+                    <button title="Select point A and point B on the model to define the axis direction." onClick={() => startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'pick-axis-a')}>Two-Point Axis</button>
+                    {(['X', 'Y', 'Z'] as const).map((axis) => (
+                      <button
+                        key={axis}
+                        title={`Set ${axis} as the joint movement axis. This edits the definition only; it does not move the piece until Test Movement.`}
+                        onClick={() => {
+                          const axisVector: [number, number, number] = axis === 'X' ? [1, 0, 0] : axis === 'Y' ? [0, 1, 0] : [0, 0, 1];
+                          const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
+                          updateKinematicJointForNode(
+                            viewportInspection.nodeId!,
+                            viewportInspection.jointId!,
+                            pieceAnalysis?.nodeId === viewportInspection.nodeId
+                              ? centeredAxisPatchForPiece(node, viewportActiveJoint, axisVector)
+                              : axisPatchForJoint(viewportActiveJoint, axisVector),
+                          );
+                          startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'show-joint');
+                        }}
+                      >
+                        Set {axis}
+                      </button>
+                    ))}
+                    {(['xy', 'xz', 'yz'] as const).map((plane) => (
+                      <button key={plane} title={`Lock this joint to motion plane ${plane.toUpperCase()}.`} onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { motionPlane: plane })}>
+                        Plano {plane.toUpperCase()}
+                      </button>
+                    ))}
+                    {[
+                      ['X+', [1, 0, 0], 'yz'],
+                      ['X-', [-1, 0, 0], 'yz'],
+                      ['Y+', [0, 1, 0], 'xy'],
+                      ['Y-', [0, -1, 0], 'xy'],
+                      ['Z+', [0, 0, 1], 'xz'],
+                      ['Z-', [0, 0, -1], 'xz'],
+                    ].map(([label, axisValue, plane]) => (
+                      <button
+                        key={`slide-${label}`}
+                        title={`Pure linear movement on ${label}. No rotation and no movement on other axes.`}
+                        onClick={() => {
+                          const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
+                          const center = node && pieceAnalysis?.nodeId === viewportInspection.nodeId && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : undefined;
+                          updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
+                            type: 'prismatic',
+                            motionProfile: 'linear-slide',
+                            axis: axisValue as [number, number, number],
+                            motionPlane: plane as MotionPlane,
+                            origin: center ? { position: center, rotation: [0, 0, 0, 1] } : viewportActiveJoint?.origin,
+                            limits: viewportActiveJoint?.limits ?? { lower: -0.5, upper: 0.5 },
+                          });
+                        }}
+                      >
+                        Slide {label}
+                      </button>
+                    ))}
+                    <button title="Reverse the current axis direction." onClick={() => viewportActiveJoint && updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { axis: [-viewportActiveJoint.axis[0], -viewportActiveJoint.axis[1], -viewportActiveJoint.axis[2]] })}>Reverse direction</button>
+                  </>
+                )}
+                {viewportInspection.repairMode === 'pivot' && (
+                  <>
+                    <button title="Pick the physical pivot point directly on the model surface." onClick={() => startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'pick-origin')}>Pick Joint Origin</button>
+                    <button title="Cancel the active pivot edit and restore the previous joint value." onClick={cancelActiveKinematicEdit}>Cancel</button>
+                  </>
+                )}
+                {viewportInspection.repairMode === 'type' && (
+                  <>
+                    <div className="context-note axis-guide">Rotatorio: la pieza queda en su sitio y gira sobre el pivot rojo. Punto fijo: eliges punto fijo y punto móvil. Traslación lineal: toda la pieza se mueve sin rotar.</div>
+                    <button
+                      title="Define pure rotation around the clicked pivot. The piece does not translate; it rotates around X, Y or Z."
+                      onClick={() => {
+                        const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
+                        const center = node && pieceAnalysis?.nodeId === viewportInspection.nodeId && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : undefined;
+                        updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
+                          type: 'revolute',
+                          motionProfile: 'rotation-around-origin',
+                          motionPlane: viewportActiveJoint?.motionPlane ?? rotationPlaneForAxis(viewportActiveJoint?.axis ?? [0, 0, 1]),
+                          origin: center ? { position: center, rotation: [0, 0, 0, 1] } : viewportActiveJoint?.origin,
+                        });
+                        startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, center ? 'show-joint' : 'pick-origin');
+                      }}
+                    >
+                      Rotatorio
+                    </button>
+                    <button
+                      title="Move both ends of the piece together along the selected axis. No rotation and no fixed/mobile point pair."
+                      onClick={() => {
+                        const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
+                        const center = node && pieceAnalysis?.nodeId === viewportInspection.nodeId && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : undefined;
+                        updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
+                          type: 'prismatic',
+                          motionProfile: 'linear-slide',
+                          motionPlane: viewportActiveJoint?.motionPlane ?? defaultPlaneForLinearAxis(viewportActiveJoint?.axis ?? [0, 1, 0]),
+                          origin: center ? { position: center, rotation: [0, 0, 0, 1] } : viewportActiveJoint?.origin,
+                        });
+                        startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'show-joint');
+                      }}
+                    >
+                      Traslacion lineal
+                    </button>
+                    <button
+                      title="Pick a fixed point and then a moving point. The moving point circles around the fixed point."
+                      onClick={() =>
+                        viewportActiveJoint &&
+                        (() => {
+                          updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
+                            type: 'prismatic',
+                            motionProfile: 'fixed-origin-lift',
+                            motionPlane: viewportActiveJoint.motionPlane ?? 'xy',
+                            drivenPoint: viewportActiveJoint.drivenPoint ?? [
+                              viewportActiveJoint.origin.position[0] + 1,
+                              viewportActiveJoint.origin.position[1],
+                              viewportActiveJoint.origin.position[2],
+                            ],
+                          });
+                          startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'pick-origin');
+                        })()
+                      }
+                    >
+                      Punto fijo
+                    </button>
+                    <button title="Change movement type to continuous rotation around the red pivot." onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { type: 'continuous', motionProfile: 'rotation-around-origin' })}>Continuous rotation</button>
+                    <button title="Mark this as a fixed joint with no relative movement." onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { type: 'fixed' })}>Fixed</button>
+                  </>
+                )}
+                {viewportInspection.repairMode === 'limits' && viewportActiveJoint && (
+                  <>
+                    <label><span>Minimum</span><input type="number" step={0.01} value={viewportActiveJoint.limits?.lower ?? 0} onChange={(event) => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { limits: { ...viewportActiveJoint.limits, lower: Number(event.target.value) } })} /></label>
+                    <label><span>Maximum</span><input type="number" step={0.01} value={viewportActiveJoint.limits?.upper ?? 0} onChange={(event) => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { limits: { ...viewportActiveJoint.limits, upper: Number(event.target.value) } })} /></label>
+                  </>
+                )}
+                {viewportInspection.repairMode === 'coupling' && viewportActiveJoint && (
+                  <>
+                    <button title="Make coupled movement follow the same direction as the driver." onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { coupling: viewportActiveJoint.coupling ? { ...viewportActiveJoint.coupling, multiplier: 1 } : viewportActiveJoint.coupling })}>Move together</button>
+                    <button title="Make coupled movement move opposite to the driver, useful for grippers." onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { coupling: viewportActiveJoint.coupling ? { ...viewportActiveJoint.coupling, multiplier: -1 } : viewportActiveJoint.coupling })}>Move opposite</button>
+                  </>
+                )}
+                <button className="primary" title="Runs the same safe movement sequence again after your correction." onClick={() => startViewportJointTest(viewportInspection.nodeId!, viewportInspection.jointId!, viewportInspection.mode ?? 'movement')}>Test Again</button>
+                <button title="Stops editing this issue and returns to the decision step." onClick={() => setViewportInspection((current) => ({ ...current, phase: 'awaiting-confirmation', repairMode: undefined, message: 'Was this movement correct?' }))}>Cancel</button>
+              </div>
+            )}
+            {viewportInspection.phase === 'complete' && (
+              <div className="viewport-inspection-actions">
+                <button title="Review joints marked as needing attention." onClick={() => setViewportInspection((current) => ({ ...current, phase: 'idle', message: 'Select a problem joint from the viewport or list.' }))}>Review problems</button>
+                <button title="Validate checks graph structure and reported mechanical issues." onClick={validate}>Validate</button>
+                <button title="Save stores the mechanical setup in the current project." onClick={save}>Save</button>
+              </div>
+            )}
+          </div>
+        )}
 
         <aside className="right-panel panel">
           <div className="inspector-head">
@@ -3204,19 +4473,142 @@ export const App = () => {
       )}
 
       {workspaceMenu && activeView === 'workspace' && (
-        <div className="warehouse-context-menu" style={{ left: workspaceMenu.x, top: workspaceMenu.y }} onClick={(event) => event.stopPropagation()}>
-          <button onClick={() => saveWorkspaceItemPermanent(workspaceMenu.nodeId)}>
-            <Save size={15} />
-            <span>Save object to project</span>
-          </button>
-          <button onClick={saveWorkspaceAssemblyPermanent}>
-            <Copy size={15} />
-            <span>Save scene set</span>
-          </button>
-          <button onClick={() => deleteWorkspaceObjectPermanent(workspaceMenu.nodeId)}>
-            <Trash2 size={15} />
-            <span>Delete permanently</span>
-          </button>
+        <div
+          className={`viewport-context-menu ${workspaceMenuJoint ? 'joint-menu' : 'part-menu'}`}
+          style={{ left: Math.min(workspaceMenu.x, window.innerWidth - 286), top: Math.min(workspaceMenu.y, window.innerHeight - 420) }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {workspaceMenuJoint ? (
+            <>
+              <div className="viewport-context-head">
+                <strong>{workspaceMenuJoint.name}</strong>
+                <span>{workspaceMenuJoint.type} | {workspaceMenuJoint.status === 'validated' ? 'Validated' : workspaceMenuJoint.status === 'rejected' ? 'Rejected' : 'Candidate'}</span>
+              </div>
+              {workspaceMenuJointIds.length > 1 && (
+                <div className="nearby-joints">
+                  <span>Joints here</span>
+                  {workspaceMenuJointIds.slice(0, 4).map((jointId) => {
+                    const joint = workspaceMenuGraph?.joints.find((item) => item.id === jointId);
+                    return (
+                      <button key={jointId} title={`Select ${joint?.name ?? jointId}`} onClick={() => setWorkspaceMenu({ ...workspaceMenu, jointId })}>
+                        {joint?.name ?? jointId}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {workspaceMenuJoint.type === 'fixed' ? (
+                <div className="context-note">Fixed Joint. No relative movement.</div>
+              ) : (
+                <>
+                  <button title="Runs a safe movement sequence for this joint so you can visually verify whether its mechanical behavior is correct." onClick={() => startViewportJointTest(workspaceMenu.nodeId, workspaceMenuJoint.id, 'movement')}>
+                    <Play size={15} />
+                    <span>Test Movement</span>
+                  </button>
+                  <button title="Moves the joint through its configured range while respecting its limits and safe caps." onClick={() => startViewportJointTest(workspaceMenu.nodeId, workspaceMenuJoint.id, 'full-range')}>
+                    <Activity size={15} />
+                    <span>Test Full Range</span>
+                  </button>
+                </>
+              )}
+              <button title="Confirms that the observed movement matches the intended mechanical behavior." onClick={() => confirmViewportJointCorrect(workspaceMenu.nodeId, workspaceMenuJoint.id)}>
+                <Check size={15} />
+                <span>Movement Correct</span>
+              </button>
+              <button title="Starts a guided repair flow for this joint." onClick={() => markViewportJointIncorrect(workspaceMenu.nodeId, workspaceMenuJoint.id)}>
+                <X size={15} />
+                <span>Movement Incorrect</span>
+              </button>
+              <button title="Focuses the camera on this joint and displays its pivot, axis, parent, child and affected chain." onClick={() => startKinematicEditForNode(workspaceMenu.nodeId, workspaceMenuJoint.id, 'show-joint')}>
+                <Eye size={15} />
+                <span>Show Joint</span>
+              </button>
+              <button title="Shows the current joint axis in the viewport." onClick={() => startKinematicEditForNode(workspaceMenu.nodeId, workspaceMenuJoint.id, 'axis-gizmo')}>
+                <Move3D size={15} />
+                <span>Show Axis</span>
+              </button>
+              <button title="Returns the whole mechanism to its defined home configuration." onClick={() => resetKinematicPoseForNode(workspaceMenu.nodeId)}>
+                <RotateCw size={15} />
+                <span>Return Home</span>
+              </button>
+              {viewportInspection.inspectedJointIds?.length && (
+                <button title="Move to the next joint in the current inspection." onClick={nextInspectionJoint}>
+                  <ArrowDown size={15} />
+                  <span>Next Joint</span>
+                </button>
+              )}
+              <button title="Open the Advanced Joint Inspector in the side panel with raw IDs, vectors, limits, evidence and coupling controls." onClick={() => setWorkspaceMenu(undefined)}>
+                <Focus size={15} />
+                <span>Advanced...</span>
+              </button>
+              {pieceAnalysis?.nodeId === workspaceMenu.nodeId ? (
+                <>
+                  <button title="Open guided correction for this isolated piece movement." onClick={() => preparePieceMotionCorrection(workspaceMenu.nodeId)}>
+                    <Hammer size={15} />
+                    <span>Correct Movement</span>
+                  </button>
+                  <button title="Close isolated piece analysis and return to the complete object workspace." onClick={() => void exitPieceAnalysis(true)}>
+                    <ArrowUp size={15} />
+                    <span>Exit piece mode</span>
+                  </button>
+                </>
+              ) : (
+                <button title="Open this clicked part alone in piece analysis mode. Double click on the part does the same." onClick={() => void enterPieceAnalysis(workspaceMenu)}>
+                  <Focus size={15} />
+                  <span>Analyze piece</span>
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="viewport-context-head">
+                <strong>Part: {workspaceMenu.objectName ?? workspaceMenuNode?.name ?? 'Object'}</strong>
+                <span>{pieceAnalysis?.nodeId === workspaceMenu.nodeId ? 'Piece analysis' : 'No joint selected'}</span>
+              </div>
+              {pieceAnalysis?.nodeId === workspaceMenu.nodeId ? (
+                <button title="Open guided correction for this isolated piece movement." onClick={() => preparePieceMotionCorrection(workspaceMenu.nodeId)}>
+                  <Hammer size={15} />
+                  <span>Correct Movement</span>
+                </button>
+              ) : (
+                <button title="Open this part alone in piece analysis mode. Double click on the part does the same." onClick={() => void enterPieceAnalysis(workspaceMenu)}>
+                  <Focus size={15} />
+                  <span>Analyze piece</span>
+                </button>
+              )}
+              <button
+                title="Create a joint at the clicked point. Use another click on the other end if this same piece needs another joint."
+                onClick={() =>
+                  workspaceMenu.objectName &&
+                  createKinematicJointForNode(workspaceMenu.nodeId, [workspaceMenu.objectName], {
+                    origin: workspaceMenu.point ?? workspaceMenu.objectCenter,
+                    drivenPoint: workspaceMenu.objectCenter,
+                  })
+                }
+              >
+                <Hammer size={15} />
+                <span>Create Joint Here</span>
+              </button>
+              <button title="Focuses the selected object in the viewport." onClick={() => workspaceMenuNode && selectNode(workspaceMenuNode.id)}>
+                <Eye size={15} />
+                <span>Show Part</span>
+              </button>
+              <button title="Save this object to the current project warehouse." onClick={() => saveWorkspaceItemPermanent(workspaceMenu.nodeId)}>
+                <Save size={15} />
+                <span>Save object to project</span>
+              </button>
+              <button title="Save the current scene objects as a reusable set." onClick={saveWorkspaceAssemblyPermanent}>
+                <Copy size={15} />
+                <span>Save scene set</span>
+              </button>
+              {pieceAnalysis?.nodeId === workspaceMenu.nodeId && (
+                <button title="Close isolated piece analysis and return to the complete object workspace." onClick={() => void exitPieceAnalysis(true)}>
+                  <ArrowUp size={15} />
+                  <span>Exit piece mode</span>
+                </button>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -3316,8 +4708,8 @@ const mechanicalTooltips = {
   pickOrigin: 'Pick Origin lets you click the real pivot point on the model surface when the joint rotates or slides around the wrong place.',
   axisGizmo: 'Axis Gizmo shows a 3D handle in the viewport so you can drag the movement axis until rotation or sliding follows the real mechanism.',
   twoPointAxis: 'Two-Point Axis uses two clicked points on the model and stores normalize(B-A) as the joint axis.',
-  revolute: 'Revolute means the child part rotates around the selected axis with lower and upper limits.',
-  prismatic: 'Prismatic means the child part slides along the selected axis with lower and upper travel limits.',
+  revolute: 'Rotate around pivot means the child part turns around the red origin point.',
+  prismatic: 'Slide whole piece means both ends move together along the selected axis. Fixed-end lift keeps the red pivot fixed and moves the driven end.',
   parent: 'Parent is the fixed reference side of the joint; movement propagates from parent to child.',
   child: 'Child is the moving side of the joint; the affected chain follows this part.',
   home: 'Home returns every tested joint value to its saved neutral pose without deleting the kinematic definition.',
@@ -3685,6 +5077,35 @@ const KinematicGraphPanel = ({
                   <button title="Use Y axis" onClick={() => updateAxis(joint, [0, 1, 0])}>Y</button>
                   <button title="Use Z axis" onClick={() => updateAxis(joint, [0, 0, 1])}>Z</button>
                 </div>
+                <label>
+                  <span title="Motion profile defines whether the whole piece moves or one endpoint stays fixed.">Motion</span>
+                  <select
+                    value={joint.motionProfile ?? (joint.type === 'prismatic' ? 'linear-slide' : 'rotation-around-origin')}
+                    onChange={(event) => {
+                      const motionProfile = event.target.value as KinematicJoint['motionProfile'];
+                      updateKinematicJoint(node.id, joint.id, {
+                        motionProfile,
+                        type: motionProfile === 'rotation-around-origin' ? 'revolute' : 'prismatic',
+                        drivenPoint:
+                          motionProfile === 'fixed-origin-lift'
+                            ? joint.drivenPoint ?? [joint.origin.position[0] + 1, joint.origin.position[1], joint.origin.position[2]]
+                            : joint.drivenPoint,
+                      });
+                    }}
+                  >
+                    <option value="rotation-around-origin">Rotate around pivot</option>
+                    <option value="linear-slide">Slide whole piece</option>
+                    <option value="fixed-origin-lift">Fixed-end lift</option>
+                  </select>
+                </label>
+                <label>
+                  <span title="Locks the joint to one movement plane so it cannot drift into another plane.">Plane</span>
+                  <select value={joint.motionPlane ?? 'xy'} onChange={(event) => updateKinematicJoint(node.id, joint.id, { motionPlane: event.target.value as MotionPlane })}>
+                    <option value="xy">XY</option>
+                    <option value="xz">XZ</option>
+                    <option value="yz">YZ</option>
+                  </select>
+                </label>
               </div>
               <details className="advanced-kinematic-fields" open={!simpleMode}>
                 <summary title="Advanced Mode exposes raw numeric axis and origin values for precise calibration.">Advanced vectors and limits</summary>

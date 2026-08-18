@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ImportedModelGeometry, MaterialDefinition, SceneNode, SerializedObjectGeometry } from '../domain/model';
+import { ImportedModelGeometry, MaterialDefinition, SceneNode, SerializedObjectGeometry, Vector3Tuple } from '../domain/model';
 import { createImportedSceneObject } from './threeSceneFactory';
 
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
@@ -77,11 +77,17 @@ const serializeCompactObject = (object: THREE.Object3D) => {
   };
 };
 
+export type IndependentWarehousePart = {
+  geometry: SerializedObjectGeometry;
+  sourcePointToStoredPoint: (point: Vector3Tuple) => Vector3Tuple;
+  sourceDirectionToStoredDirection: (direction: Vector3Tuple) => Vector3Tuple;
+};
+
 export const createIndependentWarehousePartGeometry = async (
   sourceGeometry: ImportedModelGeometry,
   material: MaterialDefinition,
   objectName: string,
-): Promise<SerializedObjectGeometry> => {
+): Promise<IndependentWarehousePart> => {
   const isolatedGeometry: ImportedModelGeometry = {
     ...JSON.parse(JSON.stringify(sourceGeometry)),
     isolatedObjectNames: [objectName],
@@ -109,11 +115,29 @@ export const createIndependentWarehousePartGeometry = async (
   const bounds = objectBounds(isolatedObject);
   isolatedObject.name = objectName;
 
+  const sourceRoot = isolatedObject.children[0] ?? isolatedObject;
+  const sourcePointToStoredPoint = (point: Vector3Tuple): Vector3Tuple => {
+    const storedPoint = sourceRoot.localToWorld(new THREE.Vector3(...point));
+    return [storedPoint.x, storedPoint.y, storedPoint.z];
+  };
+  const sourceDirectionToStoredDirection = (direction: Vector3Tuple): Vector3Tuple => {
+    const origin = sourceRoot.localToWorld(new THREE.Vector3());
+    const end = sourceRoot.localToWorld(new THREE.Vector3(...direction));
+    const storedDirection = end.sub(origin);
+    return storedDirection.lengthSq() > 0.00000001
+      ? [storedDirection.x / storedDirection.length(), storedDirection.y / storedDirection.length(), storedDirection.z / storedDirection.length()]
+      : [1, 0, 0];
+  };
+
   return {
-    kind: 'serialized-object',
-    assetName: `${objectName}.assetpart.json`,
-    objectJson: serializeCompactObject(isolatedObject),
-    originalBounds: bounds,
-    normalizedBounds: bounds,
+    geometry: {
+      kind: 'serialized-object',
+      assetName: `${objectName}.assetpart.json`,
+      objectJson: serializeCompactObject(isolatedObject),
+      originalBounds: bounds,
+      normalizedBounds: bounds,
+    },
+    sourcePointToStoredPoint,
+    sourceDirectionToStoredDirection,
   };
 };

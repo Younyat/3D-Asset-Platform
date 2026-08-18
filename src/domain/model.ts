@@ -88,6 +88,19 @@ export type ImportedPartMaterial = {
   metalness?: number;
 };
 
+/**
+ * Stable local reference for an isolated mechanical component.  It is an
+ * approximation of the centre of mass for a uniform-density mesh and is also
+ * the default pivot used when authoring a new piece movement.
+ */
+export type PieceReferenceCenter = {
+  position: Vector3Tuple;
+  method: 'volume-centroid' | 'surface-centroid' | 'bounds-center' | 'manual';
+  confidence: number;
+  triangleCount: number;
+  updatedAt: string;
+};
+
 export type ImportedModelGeometry = {
   kind: 'imported-model';
   assetName: string;
@@ -105,8 +118,11 @@ export type ImportedModelGeometry = {
   partMaterials?: ImportedPartMaterial[];
   isolatedObjectNames?: string[];
   partObjectNames?: string[];
+  pieceReferenceCenter?: PieceReferenceCenter;
   kinematicGraph?: KinematicGraph;
   kinematicState?: KinematicState;
+  functionalComponent?: FunctionalComponent;
+  isIsolatedFunctionalComponent?: boolean;
 };
 
 export type SerializedObjectGeometry = {
@@ -115,6 +131,10 @@ export type SerializedObjectGeometry = {
   objectJson: unknown;
   originalBounds: Vector3Tuple;
   normalizedBounds: Vector3Tuple;
+  pieceReferenceCenter?: PieceReferenceCenter;
+  kinematicGraph?: KinematicGraph;
+  kinematicState?: KinematicState;
+  functionalComponent?: FunctionalComponent;
 };
 
 export type GeometryDefinition = PrimitiveGeometry | GeneratedGeometry | ImportedModelGeometry | SerializedObjectGeometry;

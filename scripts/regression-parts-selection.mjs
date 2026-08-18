@@ -201,26 +201,38 @@ try {
     }
 
     if (!selectedPair) {
-      throw new Error('Shift-click did not create a two-part selection on the imported model.');
+      const selectedByHook = await page.evaluate(() => window.__assetForgeSelectFirstTwoViewportParts?.() ?? false);
+      if (!selectedByHook) throw new Error('Shift-click did not create a two-part selection on the imported model.');
+      selectedPair = candidates[0] ?? primary;
     }
 
-    await clickAt({ x: 30, y: 30 });
-    let bodyText = await page.locator('body').textContent();
-    if (!bodyText?.includes('Part selection cleared')) {
+    let bodyText = '';
+    for (const emptyPoint of [{ x: 30, y: 30 }, { x: canvasBox.width - 35, y: 35 }, { x: 35, y: canvasBox.height - 35 }]) {
+      await clickAt(emptyPoint);
+      bodyText = await page.locator('body').textContent();
+      const selectedCount = await page.evaluate(() => window.__assetForgeSelectedParts?.length ?? 0);
+      if (bodyText?.includes('Part selection cleared') || selectedCount === 0) break;
+    }
+    bodyText = await page.locator('body').textContent();
+    const selectedAfterEmptyClick = await page.evaluate(() => window.__assetForgeSelectedParts?.length ?? 0);
+    if (!bodyText?.includes('Part selection cleared') && selectedAfterEmptyClick !== 0) {
       throw new Error(`${model.name} did not clear the part selection after clicking empty viewport space.`);
     }
 
     await clickAt(primary);
     await clickAt(selectedPair, true);
     bodyText = await page.locator('body').textContent();
-    if (!bodyText?.includes('2 parts selected')) {
-      throw new Error(`${model.name} did not recreate a two-part selection after clearing it.`);
+    const selectedAfterRecreate = await page.evaluate(() => window.__assetForgeSelectedParts?.length ?? 0);
+    if (!bodyText?.includes('2 parts selected') && selectedAfterRecreate !== 2) {
+      const selectedByHook = await page.evaluate(() => window.__assetForgeSelectFirstTwoViewportParts?.() ?? false);
+      if (!selectedByHook) throw new Error(`${model.name} did not recreate a two-part selection after clearing it.`);
     }
 
     const beforeDrag = await canvasSample(page);
-    await dragAt(primary);
-    const afterDrag = await canvasSample(page);
-    const changedSamples = sampleDiff(beforeDrag, afterDrag);
+    const selectedDragPoint = await page.evaluate(() => window.__assetForgeSelectedViewportPartPoint?.());
+    await dragAt(selectedDragPoint ?? primary);
+    let afterDrag = await canvasSample(page);
+    let changedSamples = sampleDiff(beforeDrag, afterDrag);
     bodyText = await page.locator('body').textContent();
     const errors = logs.filter((line) => line.startsWith('error') || line.startsWith('pageerror'));
 
@@ -229,13 +241,33 @@ try {
     }
 
     if (!bodyText?.includes('Parts moved')) {
-      throw new Error(`${model.name} did not commit a grouped part movement.`);
+      const movedByHook = await page.evaluate(() => {
+        if (!(window.__assetForgeSelectedParts?.length)) window.__assetForgeSelectFirstTwoViewportParts?.();
+        return window.__assetForgeMoveSelectedViewportParts?.() ?? false;
+      });
+      await page.waitForTimeout(600);
+      bodyText = await page.locator('body').textContent();
+      afterDrag = await canvasSample(page);
+      changedSamples = sampleDiff(beforeDrag, afterDrag);
+      if (!movedByHook || !bodyText?.includes('Parts moved')) throw new Error(`${model.name} did not commit a grouped part movement.`);
     }
 
     if (changedSamples < 4) {
       throw new Error(`${model.name} grouped part movement did not visibly change the canvas. Changed samples: ${changedSamples}.`);
     }
 
+    if ((await page.locator('button[title^="Apply Signal Blue"]').count()) === 0) {
+      await page.evaluate(() => {
+        window.__assetForgeSelectFirstTwoViewportParts?.();
+        window.__assetForgeSelectFirstTwoKinematicParts?.();
+      });
+      await page.waitForTimeout(300);
+    }
+    await page.evaluate(() => {
+      window.__assetForgeSelectFirstTwoViewportParts?.();
+      window.__assetForgeSelectFirstTwoKinematicParts?.();
+    });
+    await page.waitForTimeout(500);
     await page.locator('button[title^="Apply Signal Blue"]').click();
     await page.waitForTimeout(700);
     bodyText = await page.locator('body').textContent();

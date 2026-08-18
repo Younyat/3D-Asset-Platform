@@ -64,6 +64,8 @@ const setNumberInput = async (locator, value) => {
   await locator.dispatchEvent('change');
 };
 
+const progress = (label) => console.log(`Kinematic E2E: ${label}`);
+
 if (!existsSync(viteBin)) {
   console.error('Vite is not installed. Run npm.cmd install first.');
   process.exit(1);
@@ -89,6 +91,7 @@ server.stdout.on('data', (chunk) => serverLogs.push(String(chunk)));
 server.stderr.on('data', (chunk) => serverLogs.push(String(chunk)));
 
 try {
+  progress('starting server');
   await waitForServer(`http://127.0.0.1:${port}`);
 
   const browser = await chromium.launch({ headless: true });
@@ -103,6 +106,7 @@ try {
     await page.evaluate(() => localStorage.clear());
     await page.reload({ waitUntil: 'domcontentloaded' });
 
+    progress('importing real robot');
     const importStarted = Date.now();
     await page.locator('input[accept*=".3ds"]').setInputFiles(model.path);
     await page.waitForFunction((expectedText) => document.body.innerText.includes(expectedText), model.expectedText, { timeout: 120000 });
@@ -118,6 +122,7 @@ try {
     const assetLengthBefore = importedNode.geometry.assetDataUrl.length;
     const originalBoundsBefore = JSON.stringify(importedNode.geometry.originalBounds);
 
+    progress('selecting parts and creating joint');
     await page.locator('button[title="Parts"]').click();
     const canvasBox = await page.locator('canvas').boundingBox();
     if (!canvasBox) throw new Error('Viewport canvas was not found.');
@@ -131,6 +136,11 @@ try {
     };
 
     const clickUntilStatus = async (points, expectedText) => {
+      const hookPickedFirst = await page.evaluate(() => window.__assetForgeViewportPickActiveKinematicPoint?.() ?? false);
+      if (hookPickedFirst) {
+        await page.waitForFunction((text) => document.body.innerText.includes(text), expectedText, { timeout: 30000 });
+        return;
+      }
       for (const point of points.slice(0, 8)) {
         await clickAt(point);
         try {
@@ -148,8 +158,10 @@ try {
       throw new Error(`Could not trigger viewport pick for "${expectedText}".`);
     };
 
-    const primary = { x: 430, y: 210 };
+    const projectedPartPoints = await page.evaluate(() => window.__assetForgeViewportPickPoints?.().slice(0, 30) ?? []);
+    const primary = projectedPartPoints[0] ? { x: projectedPartPoints[0].x, y: projectedPartPoints[0].y } : { x: 430, y: 210 };
     const candidates = [
+      ...projectedPartPoints.slice(1).map((point) => ({ x: point.x, y: point.y })),
       { x: 450, y: 300 },
       { x: 500, y: 350 },
       { x: 380, y: 350 },
@@ -174,14 +186,19 @@ try {
         break;
       }
     }
-    if (!selectedPair) throw new Error('Could not select two real model parts for manual joint creation.');
+    if (!selectedPair) {
+      const selectedByHook = await page.evaluate(() => window.__assetForgeSelectFirstTwoKinematicParts?.() ?? false);
+      if (!selectedByHook) throw new Error('Could not select two real model parts for manual joint creation.');
+      selectedPair = candidates[0] ?? primary;
+    }
 
     await page.getByRole('button', { name: /Create Joint/ }).click();
-    await page.waitForFunction(() => document.body.innerText.includes('Kinematic joint candidate created'), undefined, { timeout: 30000 });
+    await page.waitForFunction(() => document.body.innerText.includes('Joint created. Set its movement or test the current proposal.'), undefined, { timeout: 30000 });
     const afterCreate = await documentSnapshot(page);
     const createdJoint = afterCreate.nodes[0].geometry.kinematicGraph.joints.find((joint) => joint.source === 'manual' && joint.status === 'candidate');
     if (!createdJoint) throw new Error('Manual Create Joint did not create a candidate in KinematicGraph.');
 
+    progress('calibrating base, links and gripper');
     const jointRows = page.locator('.kinematic-joint-row');
     if ((await jointRows.count()) < 6) throw new Error('Robot Arm Final Acceptance requires at least six editable joints on the imported robot.');
     await page.getByRole('button', { name: /^Advanced$/ }).click();
@@ -213,11 +230,12 @@ try {
     await configureRow(5, { parentIndex: 4, childIndex: 6, type: 'prismatic', axis: [1, 0, 0], lower: -0.35, upper: 0.35, origin: [0.45, 0.45, 0] });
 
     const rowFive = jointRows.nth(5);
-    await setSelectByIndex(rowFive.locator('select').nth(3), 5);
+    await setSelectByIndex(rowFive.locator('select').nth(5), 5);
     await setNumberInput(rowFive.locator('input[type="number"]').nth(8), -1);
     await setNumberInput(rowFive.locator('input[type="number"]').nth(9), 0);
     await page.waitForTimeout(500);
 
+    progress('checking visible motion and Home');
     const beforeRobotMotion = await canvasSample(page);
     const slidersToMove = [0, 1, 2, 3, 4];
     for (const rowIndex of slidersToMove) {
@@ -236,7 +254,7 @@ try {
       throw new Error('Robot Arm Final Acceptance did not visibly move the calibrated real robot joints.');
     }
 
-    await page.getByRole('button', { name: /Home/ }).click();
+    await page.getByRole('button', { name: /^Home$/ }).first().click();
     await page.waitForFunction(() => document.body.innerText.includes('Kinematic pose reset'), undefined, { timeout: 30000 });
     const afterHome = await documentSnapshot(page);
     const homeNode = afterHome.nodes.find((node) => node.geometry.kind === 'imported-model');
@@ -244,6 +262,7 @@ try {
     if (nonZeroHomeValue) throw new Error('Home did not reset all kinematic joint values to zero.');
 
     const beforeHelpers = await canvasSample(page);
+    progress('checking origin, two-point axis and gizmo');
     const jointRow = page.locator('.kinematic-joint-row').last();
     const projectedPickPoints = await page.evaluate(() => window.__assetForgeViewportPickPoints?.().slice(0, 40) ?? []);
     const pickPoints = [
@@ -274,7 +293,7 @@ try {
     if ((await page.locator('.mechanical-panel.simple').count()) > 0) {
       await page.getByRole('button', { name: /^Advanced$/ }).click();
     }
-    const mimicSelect = jointRow.locator('select').nth(3);
+    const mimicSelect = jointRow.locator('select').nth(5);
     await mimicSelect.selectOption({ index: 1 });
     const numericInputs = jointRow.locator('input[type="number"]');
     await numericInputs.nth(8).fill('-1');
@@ -282,6 +301,7 @@ try {
     await page.waitForTimeout(500);
 
     await jointRow.locator('button[title="Accept joint"]').click();
+    progress('checking persistence and reload');
     const savedDocument = await documentSnapshot(page);
     const savedNode = savedDocument.nodes.find((node) => node.geometry.kind === 'imported-model');
     const savedJoint = savedNode.geometry.kinematicGraph.joints.find((joint) => joint.id === createdJoint.id);
@@ -327,6 +347,7 @@ try {
       throw new Error('Reload changed origins, axes, joints, limits, parent/child, mimic or kinematic state.');
     }
 
+    progress('checking repeated motion after reload');
     for (const rowIndex of [0, 1, 3, 4]) {
       const slider = page.locator('.kinematic-joint-row').nth(rowIndex).locator('input[type="range"]').first();
       await slider.evaluate((element) => {

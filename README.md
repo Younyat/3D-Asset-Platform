@@ -27,6 +27,7 @@ El objetivo principal es reducir el trabajo manual necesario para preparar model
 - Borrado permanente desde workspace o warehouse, eliminando tambien el fichero local asociado.
 - Componentes funcionales persistentes con interfaces mecanicas, propiedades, subgrafo cinematico y validacion de assemblies.
 - Kinematic Authoring M1 para corregir joints, ejes arbitrarios, origen fisico, limites, estado home y validacion del grafo cinematico.
+- Calibracion de piezas aisladas: centro de referencia calculado desde la malla, correccion manual persistente y prueba visual sobre ese pivot.
 - Preflight de exportacion y perfiles GLB para uso generico, Unity, Unreal y Godot.
 - Modo navegador y base Tauri para aplicacion de escritorio.
 
@@ -202,6 +203,36 @@ Funciones actuales:
 
 La definicion estructural queda en `kinematicGraph`; la pose de prueba queda separada en `kinematicState`. Esto evita acumular errores y permite guardar/recuperar el mecanismo sin convertir la geometria original en un asset destructivo.
 
+### 9. Calibracion De Piezas Desmontadas
+
+Una pieza desmontada no hereda los movimientos del modelo completo. Al abrir `Analyze piece`, la plataforma crea una definicion limpia y realiza este flujo antes de permitir que se guarde como componente funcional:
+
+```text
+Pieza aislada
+  -> centro de referencia geometrico
+  -> pivot y ejes locales visibles
+  -> tipo de movimiento y eje elegidos
+  -> prueba de movimiento acotada
+  -> validacion y persistencia en Warehouse
+```
+
+El centro se calcula directamente sobre los triangulos reales de la malla, en coordenadas locales de la pieza:
+
+1. Centroide de volumen mediante tetraedros con densidad uniforme, cuando la malla forma un solido cerrado.
+2. Centroide ponderado por area, cuando el modelo es una superficie abierta o tiene winding inconsistente.
+3. Centro de bounds como respaldo seguro para assets sin triangulos validos.
+4. Correccion manual con `Correct reference center`: el clic sustituye la estimacion y se guarda como `manual`.
+
+La referencia se persiste como `pieceReferenceCenter` con posicion, metodo, confianza, numero de triangulos y fecha. Tambien se copia al `FunctionalComponent`, al pivot del joint y al objeto independiente almacenado. Al serializar una pieza para Warehouse, sus puntos y ejes se convierten al espacio de coordenadas del nuevo asset; asi el pivot no queda desplazado al volver a cargarla.
+
+![Centro de referencia calculado sobre una pieza real](docs/readme-assets/piece-reference-center.png)
+
+La pieza no se mueve durante el calculo. Despues se selecciona el comportamiento mecanico: estatica, rotacion pura alrededor del pivot, traslacion pura sobre un eje, o movimiento entre dos extremos. Las pruebas siempre arrancan desde `Home`, respetan limites y vuelven a `Home` al terminar. Una rotacion no introduce traslacion adicional; una traslacion se proyecta exclusivamente sobre su eje configurado.
+
+![Prueba real de rotacion Z desde el pivot de la pieza](docs/readme-assets/piece-rotation-test.png)
+
+La geometria por si sola no puede demostrar la funcion fisica real de una pieza sin sus conexiones, contactos o especificacion mecanica. Por eso la plataforma automatiza el calculo y las invariantes geometricas, pero deja al usuario validar la funcion mecanica observada antes de aceptarla. Esta separacion evita inventar articulaciones falsas.
+
 ### Persistencia De M1
 
 M1 separa tres responsabilidades:
@@ -325,6 +356,8 @@ Assets actuales:
 - `motion-trainer-test.png`
 - `learned-motion-sequence.png`
 - `learned-motion-demo.gif`
+- `piece-reference-center.png` (evidencia Playwright del centro calculado)
+- `piece-rotation-test.png` (evidencia Playwright de la prueba de rotacion)
 
 ## Estado De Validacion
 
@@ -337,11 +370,20 @@ npm run test:kinematics:e2e
 npm run test:articulation
 npm run test:render
 npm run test:parts
+npm run test:piece-mode
 npm run test:all
 ```
 
 `test:kinematics` cubre K01-K30: normalizacion de ejes, ejes invalidos, eje arbitrario, pivote correcto, revolute, continuous, prismatic, fixed, limites, propagacion padre-hijo, cadenas con incoming/outgoing joint, ciclos, huerfanos, IDs duplicados, NaN/Infinity, two-point axis, origin picking, mimic/coupling, logical controls, home sin drift, no destructivo, rejected joints, quaternion normalizado, multiples padres y rendimiento sintetico.
 
 `test:kinematics:e2e` usa Playwright con un modelo robotico real para validar creacion manual de joint, picking visual, helpers de pivot/eje, mimic, guardado, reload, migracion legacy y proteccion no destructiva del asset fuente.
+
+`test:piece-mode` usa `Rmk3.obj` y comprueba el flujo completo de una pieza desmontada: entrada desde un joint, calculo de centro desde la malla, correccion manual, coincidencia exacta entre centro y pivot, rotacion Z durante una prueba real, salida de modo pieza y persistencia del centro dentro del componente de Warehouse.
+
+Para regenerar las capturas del README desde esta prueba en Windows PowerShell:
+
+```powershell
+$env:PIECE_MODE_CAPTURE_DIR='docs/readme-assets'; npm.cmd run test:piece-mode
+```
 
 El aviso de bundle grande es esperado porque la aplicacion incluye Three.js y varios loaders 3D. No bloquea la build de produccion.
