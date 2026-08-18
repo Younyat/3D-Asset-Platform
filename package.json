@@ -15,6 +15,7 @@
     "test:kinematics:e2e": "node scripts/kinematics-e2e.mjs",
     "test:ux": "node scripts/kinematics-ux.mjs",
     "test:piece-mode": "node scripts/piece-analysis-e2e.mjs",
+    "docs:capture:piece-motion": "node scripts/capture-piece-motion-gif.mjs",
     "test:all": "npm.cmd run test:kinematics && npm.cmd run test:kinematics:e2e && npm.cmd run test:ux && npm.cmd run test:piece-mode && npm.cmd run test:articulation && npm.cmd run test:parts && npm.cmd run test:render",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",

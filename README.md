@@ -231,6 +231,8 @@ La pieza no se mueve durante el calculo. Despues se selecciona el comportamiento
 
 ![Prueba real de rotacion Z desde el pivot de la pieza](docs/readme-assets/piece-rotation-test.png)
 
+![Demo animada de la rotacion de una pieza aislada](docs/readme-assets/piece-rotation-demo.gif)
+
 La geometria por si sola no puede demostrar la funcion fisica real de una pieza sin sus conexiones, contactos o especificacion mecanica. Por eso la plataforma automatiza el calculo y las invariantes geometricas, pero deja al usuario validar la funcion mecanica observada antes de aceptarla. Esta separacion evita inventar articulaciones falsas.
 
 ### Persistencia De M1
@@ -358,6 +360,7 @@ Assets actuales:
 - `learned-motion-demo.gif`
 - `piece-reference-center.png` (evidencia Playwright del centro calculado)
 - `piece-rotation-test.png` (evidencia Playwright de la prueba de rotacion)
+- `piece-rotation-demo.gif` (animacion real de la prueba de rotacion)
 
 ## Estado De Validacion
 
@@ -384,6 +387,12 @@ Para regenerar las capturas del README desde esta prueba en Windows PowerShell:
 
 ```powershell
 $env:PIECE_MODE_CAPTURE_DIR='docs/readme-assets'; npm.cmd run test:piece-mode
+```
+
+Para regenerar el GIF animado de la pieza:
+
+```powershell
+npm.cmd run docs:capture:piece-motion
 ```
 
 El aviso de bundle grande es esperado porque la aplicacion incluye Three.js y varios loaders 3D. No bloquea la build de produccion.
