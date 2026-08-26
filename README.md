@@ -51,12 +51,6 @@ Los movimientos validados se guardan, se muestran en una lista y se pueden orden
 
 ![Secuencia de movimientos validados](docs/readme-assets/learned-motion-sequence.png)
 
-### Demo Animada
-
-La demo aprendida aplica movimiento sobre la escena Three.js ya cargada, evitando recargar modelos pesados durante la reproduccion.
-
-![Demo animada de movimiento aprendido](docs/readme-assets/learned-motion-demo.gif)
-
 ### Desmantelado En Piezas
 
 Un modelo robotico importado puede separarse en piezas reutilizables. Cada pieza queda clasificada por categoria y clase dentro del warehouse, con miniatura real generada desde la escena.
@@ -231,20 +225,6 @@ La pieza no se mueve durante el calculo. Despues se selecciona el comportamiento
 
 ![Prueba real de rotacion Z desde el pivot de la pieza](docs/readme-assets/piece-rotation-test.png)
 
-Las siguientes capturas animadas se generan desde tres articulaciones distintas del brazo Rmk3. Cada GIF se valida en Chromium comparando dos renderizados de la propia animacion antes de guardarse.
-
-**Base rotativa**
-
-![Rotacion de la base del robot](docs/readme-assets/piece-rotation-demo.gif)
-
-**Enlace articulado**
-
-![Rotacion de un enlace del robot](docs/readme-assets/piece-link-rotation.gif)
-
-**Cabezal**
-
-![Rotacion del cabezal del robot](docs/readme-assets/piece-head-rotation.gif)
-
 **Brazo industrial completo**
 
 El paquete `brazo-robot-industrial.obj` se recupera como rig funcional aunque el OBJ sea estatico: la plataforma reconstruye J1-J6 desde las mallas, aplica pivotes medidos sobre la geometria real y reproduce el ciclo profesional completo.
@@ -375,12 +355,9 @@ Assets actuales:
 - `imported-iramk4-viewport.png`
 - `motion-trainer-test.png`
 - `learned-motion-sequence.png`
-- `learned-motion-demo.gif`
 - `piece-reference-center.png` (evidencia Playwright del centro calculado)
 - `piece-rotation-test.png` (evidencia Playwright de la prueba de rotacion)
-- `piece-rotation-demo.gif` (animacion validada de la base rotativa)
-- `piece-link-rotation.gif` (animacion validada de un enlace articulado)
-- `piece-head-rotation.gif` (animacion validada del cabezal)
+- `robot-arm-full-motion.gif` (animacion completa del brazo industrial)
 
 ## Estado De Validacion
 
@@ -415,12 +392,9 @@ Para regenerar una animacion de una pieza:
 npm.cmd run docs:capture:piece-motion
 ```
 
-Para generar las tres demostraciones mecanicas del README:
+Para generar la demostracion mecanica del README:
 
 ```powershell
-$env:PIECE_MOTION_JOINT_INDEX='0'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-rotation-demo.gif'; npm.cmd run docs:capture:piece-motion
-$env:PIECE_MOTION_JOINT_INDEX='1'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-link-rotation.gif'; npm.cmd run docs:capture:piece-motion
-$env:PIECE_MOTION_JOINT_INDEX='2'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-head-rotation.gif'; npm.cmd run docs:capture:piece-motion
 npm.cmd run docs:capture:robot-arm-motion
 ```
 
