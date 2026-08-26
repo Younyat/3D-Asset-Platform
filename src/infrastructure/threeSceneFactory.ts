@@ -7,6 +7,7 @@ import { TDSLoader } from 'three/examples/jsm/loaders/TDSLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { SceneNode } from '../domain/model';
 import { seededNoise } from '../domain/generators';
+import { applyStaticObjRobotMaterials } from '../application/kinematics/professionalRobotRig';
 
 const applyNodeTransform = (object: THREE.Object3D, node: SceneNode) => {
   object.position.fromArray(node.transform.position);
@@ -297,6 +298,9 @@ const applyNodeMaterialToImportedMeshes = (object: THREE.Object3D, node: SceneNo
     }
   });
 };
+
+const isStaticIndustrialRobotObj = (node: SceneNode) =>
+  node.geometry.kind === 'imported-model' && node.geometry.sourceFormat === 'obj' && node.geometry.assetName === 'brazo-robot-industrial.obj';
 
 const createPrimitiveObject = (node: SceneNode) => {
   const material = makeMaterial(node);
@@ -901,6 +905,7 @@ export const createImportedSceneObject = async (node: SceneNode) => {
   applyImportedFreePartTransforms(root, node);
   root = isolateImportedObjects(root, node);
   applyNodeMaterialToImportedMeshes(root, node);
+  if (isStaticIndustrialRobotObj(node)) applyStaticObjRobotMaterials(root);
   if (isolated) {
     root.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(root);

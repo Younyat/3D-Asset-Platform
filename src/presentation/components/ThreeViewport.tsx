@@ -584,6 +584,7 @@ export const ThreeViewport = ({
     plane: THREE.Plane;
   }>();
   const selectedPartKeysRef = useRef<Set<string>>(new Set());
+  const captureModeRef = useRef(false);
   const runtimeRef = useRef<{
     renderer: THREE.WebGLRenderer;
     camera: THREE.PerspectiveCamera;
@@ -1056,6 +1057,7 @@ export const ThreeViewport = ({
 
     const renderSelectedPartBoxes = () => {
       clearSelectedPartBoxes();
+      if (captureModeRef.current) return;
       if (toolRef.current !== 'parts') return;
 
       [...selectedPartKeysRef.current].forEach((key) => {
@@ -1728,6 +1730,8 @@ export const ThreeViewport = ({
             canvas: { width: number; height: number };
           }
         | undefined;
+      __assetForgeViewportSetCamera?: (view: { position: [number, number, number]; target: [number, number, number] }) => boolean;
+      __assetForgeViewportPrepareCapture?: () => boolean;
       __assetForgeSelectFirstTwoViewportParts?: () => boolean;
       __assetForgeSelectedViewportPartPoint?: () => { x: number; y: number } | undefined;
       __assetForgeMoveSelectedViewportParts?: () => boolean;
@@ -1830,6 +1834,26 @@ export const ThreeViewport = ({
         canvas: { width: rect.width, height: rect.height },
       };
     };
+    runtimeWindow.__assetForgeViewportSetCamera = (view) => {
+      if (!Array.isArray(view.position) || !Array.isArray(view.target)) return false;
+      camera.position.set(view.position[0], view.position[1], view.position[2]);
+      orbit.target.set(view.target[0], view.target[1], view.target[2]);
+      camera.lookAt(orbit.target);
+      camera.updateProjectionMatrix();
+      orbit.update();
+      return true;
+    };
+    runtimeWindow.__assetForgeViewportPrepareCapture = () => {
+      captureModeRef.current = true;
+      transform.detach();
+      transform.enabled = false;
+      transform.getHelper().visible = false;
+      selectionBox.visible = false;
+      clearSelectedPartBoxes();
+      kinematicHelperGroup.visible = false;
+      kinematicAxisHandle.visible = false;
+      return true;
+    };
     runtimeWindow.__assetForgeSelectFirstTwoViewportParts = () => {
       const items: Array<{ nodeId: string; objectName: string }> = [];
       assetRoot.traverse((object) => {
@@ -1888,6 +1912,8 @@ export const ThreeViewport = ({
       delete runtimeWindow.__assetForgeViewportPickActiveKinematicPoint;
       delete runtimeWindow.__assetForgeViewportActiveJointPoint;
       delete runtimeWindow.__assetForgeViewportKinematicDebug;
+      delete runtimeWindow.__assetForgeViewportSetCamera;
+      delete runtimeWindow.__assetForgeViewportPrepareCapture;
       delete runtimeWindow.__assetForgeSelectFirstTwoViewportParts;
       delete runtimeWindow.__assetForgeSelectedViewportPartPoint;
       delete runtimeWindow.__assetForgeMoveSelectedViewportParts;
@@ -1997,6 +2023,19 @@ export const ThreeViewport = ({
     const syncViewportControls = () => {
       const selected = runtime.assetRoot.children.find((child) => child.userData.nodeId === document.selectedNodeId);
       runtime.transform.detach();
+
+      if (captureModeRef.current) {
+        runtime.transform.enabled = false;
+        runtime.transform.getHelper().visible = false;
+        runtime.selectionBox.visible = false;
+        selectedPartKeysRef.current.clear();
+        clearBoxHelpers(runtime.scene, runtime.selectedPartBoxes);
+        clearRuntimePartTransformGroup();
+        return;
+      }
+
+      runtime.transform.enabled = true;
+      runtime.transform.getHelper().visible = true;
 
       const selectedNode = document.nodes.find((node) => node.id === document.selectedNodeId);
       if (tool !== 'parts') {

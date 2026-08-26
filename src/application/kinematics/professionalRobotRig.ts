@@ -297,7 +297,7 @@ const makeStaticObjMaterial = (name: keyof typeof STATIC_OBJ_MATERIALS) => {
   });
 };
 
-const applyStaticObjRobotMaterials = (scene: THREE.Object3D) => {
+export const applyStaticObjRobotMaterials = (scene: THREE.Object3D) => {
   const materialCache = new Map<string, THREE.MeshStandardMaterial>();
   const materialFor = (name: keyof typeof STATIC_OBJ_MATERIALS) => {
     const cached = materialCache.get(name);

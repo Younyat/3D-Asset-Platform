@@ -88,12 +88,16 @@ try {
     await page.waitForFunction(() => document.body.innerText.includes('7 joints') && document.body.innerText.includes('3 animations'), undefined, {
       timeout: 120000,
     });
+    await page.waitForFunction(() => window.__assetForgeViewportPrepareCapture?.(), undefined, { timeout: 30000 });
+    await page.waitForFunction(() => window.__assetForgeViewportSetCamera?.({ position: [8.2, 3.35, -7.35], target: [-0.18, 1.02, -0.08] }), undefined, {
+      timeout: 30000,
+    });
     await page.waitForTimeout(900);
 
     const frames = [await captureCanvasFrame(page)];
     await page.getByRole('button', { name: /Auto brazo completo/ }).click();
-    for (let index = 0; index < 7; index += 1) {
-      await page.waitForTimeout(850);
+    for (let index = 0; index < 16; index += 1) {
+      await page.waitForTimeout(650);
       frames.push(await captureCanvasFrame(page));
     }
 
@@ -101,7 +105,7 @@ try {
     const maxChanged = decoded.slice(1).reduce((best, frame) => Math.max(best, changedPixelSamples(decoded[0].pixels, frame.pixels)), 0);
     if (maxChanged < 80) throw new Error(`Captured robot motion is not visibly different (${maxChanged} changed samples).`);
 
-    const gif = encodeGif({ width: decoded[0].width, height: decoded[0].height, frames: decoded, delayCentiseconds: 70 });
+    const gif = encodeGif({ width: decoded[0].width, height: decoded[0].height, frames: decoded, delayCentiseconds: 55 });
     const gifDimensions = await page.evaluate(
       (source) =>
         new Promise((resolveImage, rejectImage) => {
