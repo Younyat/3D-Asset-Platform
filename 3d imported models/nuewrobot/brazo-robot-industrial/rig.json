@@ -1,0 +1,168 @@
+{
+  "schema": "robot-arm-rig/1.0",
+  "name": "IndustrialRobotArm",
+  "units": "meters",
+  "angleUnits": "degrees",
+  "up": "Y",
+  "handedness": "right",
+  "origin": "centro de la placa base, apoyada en y = 0",
+  "toolFrame": "J5_tool_roll",
+  "approxHeightHomeMeters": 1.45,
+  "approxHorizontalReachMeters": 1.15,
+
+  "hierarchy": [
+    "IndustrialRobotArm",
+    "  BASE_fixed",
+    "    J1_base_yaw",
+    "      J2_shoulder_pitch",
+    "        J3_elbow_pitch",
+    "          J4_wrist_pitch",
+    "            J5_tool_roll",
+    "              J6_gripper_finger_L",
+    "              J6_gripper_finger_R"
+  ],
+
+  "linkLengthsMeters": {
+    "baseTopFromGround": 0.38,
+    "shoulderPivotFromBaseTop": 0.52,
+    "upperArm": 0.62,
+    "forearm": 0.46,
+    "wrist": 0.14,
+    "gripperFinger": 0.18
+  },
+
+  "joints": [
+    {
+      "order": "J1", "name": "J1_base_yaw", "type": "revolute", "axis": "Y",
+      "parent": "BASE_fixed", "originMeters": [0, 0.38, 0],
+      "limitsDeg": [-170, 170], "maxSpeedDegPerSec": 180, "homeDeg": 0,
+      "description": "Giro de la torreta sobre la base fija."
+    },
+    {
+      "order": "J2", "name": "J2_shoulder_pitch", "type": "revolute", "axis": "Z",
+      "parent": "J1_base_yaw", "originMeters": [0.02, 0.52, 0],
+      "limitsDeg": [-60, 95], "maxSpeedDegPerSec": 140, "homeDeg": -10,
+      "description": "Cabeceo del hombro. Positivo levanta el brazo hacia -X."
+    },
+    {
+      "order": "J3", "name": "J3_elbow_pitch", "type": "revolute", "axis": "Z",
+      "parent": "J2_shoulder_pitch", "originMeters": [0, 0.62, 0],
+      "limitsDeg": [-20, 150], "maxSpeedDegPerSec": 160, "homeDeg": 60,
+      "description": "Cabeceo del codo. Continua la curvatura del hombro."
+    },
+    {
+      "order": "J4", "name": "J4_wrist_pitch", "type": "revolute", "axis": "Z",
+      "parent": "J3_elbow_pitch", "originMeters": [0, 0.46, 0],
+      "limitsDeg": [-110, 110], "maxSpeedDegPerSec": 250, "homeDeg": 60,
+      "description": "Cabeceo de la muneca. J2+J3+J4 ~= 180 mantiene la pinza vertical."
+    },
+    {
+      "order": "J5", "name": "J5_tool_roll", "type": "revolute", "axis": "Y",
+      "parent": "J4_wrist_pitch", "originMeters": [0, 0.14, 0],
+      "limitsDeg": [-180, 180], "maxSpeedDegPerSec": 320, "homeDeg": 0,
+      "description": "Giro de la herramienta. Marco de referencia del efector final."
+    },
+    {
+      "order": "J6", "name": "J6_gripper_finger_L", "type": "prismatic", "axis": "X",
+      "parent": "J5_tool_roll", "originMeters": [-0.085, 0.12, 0],
+      "limitsMeters": [-0.085, -0.032], "maxSpeedMetersPerSec": 0.12, "homeMeters": -0.085,
+      "description": "Dedo izquierdo. Se mueve en espejo con el derecho."
+    },
+    {
+      "order": "J6", "name": "J6_gripper_finger_R", "type": "prismatic", "axis": "X",
+      "parent": "J5_tool_roll", "originMeters": [0.085, 0.12, 0],
+      "limitsMeters": [0.032, 0.085], "maxSpeedMetersPerSec": 0.12, "homeMeters": 0.085,
+      "description": "Dedo derecho. Se mueve en espejo con el izquierdo."
+    }
+  ],
+
+  "gripper": {
+    "type": "parallel_2_finger",
+    "axis": "X",
+    "openMeters": 0.085,
+    "closedMeters": 0.032,
+    "jawOpeningOpenMeters": 0.170,
+    "jawOpeningClosedMeters": 0.064,
+    "formula": "x = 0.032 + 0.053 * t     (t = 1 abierta, t = 0 cerrada)",
+    "apply": "finger_L.position.x = -x ; finger_R.position.x = +x",
+    "graspEventsSec": { "close": 3.3, "open": 7.6, "clip": "Ciclo_Pick_And_Place" }
+  },
+
+  "materials": [
+    { "name": "steel_housing",  "hex": "#454b52", "roughness": 0.5,  "metalness": 0.4 },
+    { "name": "safety_orange",  "hex": "#d9520c", "roughness": 0.42, "metalness": 0.18 },
+    { "name": "chrome_joint",   "hex": "#cfd2d6", "roughness": 0.22, "metalness": 0.8 },
+    { "name": "cable_rubber",   "hex": "#1b1c1e", "roughness": 0.85, "metalness": 0.05 },
+    { "name": "warning_yellow", "hex": "#e8b400", "roughness": 0.5,  "metalness": 0.1 }
+  ],
+
+  "poses": {
+    "home":        { "J1": 0,   "J2": -10, "J3": 60,  "J4": 60,  "J5": 0,  "grip": 1 },
+    "retracted":   { "J1": 0,   "J2": 20,  "J3": 90,  "J4": 40,  "J5": 0,  "grip": 0 },
+    "pickApproach":{ "J1": -40, "J2": 50,  "J3": 70,  "J4": 60,  "J5": 0,  "grip": 1 },
+    "pickDown":    { "J1": -40, "J2": 70,  "J3": 70,  "J4": 40,  "J5": 0,  "grip": 1 },
+    "placeDown":   { "J1": 55,  "J2": 70,  "J3": 70,  "J4": 40,  "J5": 90, "grip": 0 }
+  },
+
+  "clips": [
+    {
+      "name": "Ciclo_Pick_And_Place",
+      "durationSec": 10.0,
+      "loop": true,
+      "interpolation": "linear (SLERP en rotaciones)",
+      "keys": [
+        { "t": 0.0,  "phase": "home",                "J1": 0,   "J2": -10, "J3": 60, "J4": 60, "J5": 0,  "grip": 1 },
+        { "t": 1.5,  "phase": "aproximacion",        "J1": -40, "J2": 50,  "J3": 70, "J4": 60, "J5": 0,  "grip": 1 },
+        { "t": 2.6,  "phase": "descenso",            "J1": -40, "J2": 70,  "J3": 70, "J4": 40, "J5": 0,  "grip": 1 },
+        { "t": 3.3,  "phase": "cierre (agarre)",     "J1": -40, "J2": 70,  "J3": 70, "J4": 40, "J5": 0,  "grip": 0 },
+        { "t": 4.2,  "phase": "elevacion",           "J1": -40, "J2": 50,  "J3": 70, "J4": 60, "J5": 0,  "grip": 0 },
+        { "t": 5.8,  "phase": "transferencia",       "J1": 55,  "J2": 50,  "J3": 70, "J4": 60, "J5": 90, "grip": 0 },
+        { "t": 6.9,  "phase": "descenso destino",    "J1": 55,  "J2": 70,  "J3": 70, "J4": 40, "J5": 90, "grip": 0 },
+        { "t": 7.6,  "phase": "apertura (suelta)",   "J1": 55,  "J2": 70,  "J3": 70, "J4": 40, "J5": 90, "grip": 1 },
+        { "t": 8.5,  "phase": "retirada",            "J1": 55,  "J2": 50,  "J3": 70, "J4": 60, "J5": 90, "grip": 1 },
+        { "t": 10.0, "phase": "retorno a home",      "J1": 0,   "J2": -10, "J3": 60, "J4": 60, "J5": 0,  "grip": 1 }
+      ]
+    },
+    {
+      "name": "Ir_A_Home",
+      "durationSec": 2.0,
+      "loop": false,
+      "keys": [
+        { "t": 0.0, "J1": 0, "J2": 20,  "J3": 90, "J4": 40, "J5": 0, "grip": 0 },
+        { "t": 2.0, "J1": 0, "J2": -10, "J3": 60, "J4": 60, "J5": 0, "grip": 1 }
+      ]
+    },
+    {
+      "name": "Demo_Ejes",
+      "durationSec": 16.2,
+      "loop": true,
+      "purpose": "Verificacion: cada eje barre su rango completo, la pinza al final.",
+      "keys": [
+        { "t": 0.0,  "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 1.6,  "J1": -170, "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 4.0,  "J1": 170,  "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 5.4,  "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 6.6,  "J1": 0,    "J2": 95,  "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 7.8,  "J1": 0,    "J2": -60, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 8.8,  "J1": 0,    "J2": -10, "J3": 150, "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 9.8,  "J1": 0,    "J2": -10, "J3": -20, "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 10.8, "J1": 0,    "J2": -10, "J3": 60,  "J4": 110,  "J5": 0,    "grip": 1 },
+        { "t": 11.8, "J1": 0,    "J2": -10, "J3": 60,  "J4": -110, "J5": 0,    "grip": 1 },
+        { "t": 12.8, "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": 180,  "grip": 1 },
+        { "t": 13.8, "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": -180, "grip": 1 },
+        { "t": 14.6, "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 },
+        { "t": 15.4, "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 0 },
+        { "t": 16.2, "J1": 0,    "J2": -10, "J3": 60,  "J4": 60,   "J5": 0,    "grip": 1 }
+      ]
+    }
+  ],
+
+  "rules": [
+    "Recortar siempre los angulos contra limitsDeg antes de escribirlos.",
+    "Interpolar hacia el objetivo limitando la velocidad por maxSpeedDegPerSec; nunca saltos instantaneos.",
+    "Orden de movimiento: J1 -> J2/J3 -> J4/J5 -> J6. La pinza actua con el brazo detenido.",
+    "Para descender vertical sobre una pieza, mantener J2 + J3 + J4 ~= 180.",
+    "BASE_fixed no se mueve: para desplazar el robot, mover el nodo raiz.",
+    "Los dedos de la pinza se mueven SIEMPRE en espejo (mismo valor, signo opuesto)."
+  ]
+}

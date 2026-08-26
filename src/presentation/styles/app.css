@@ -1045,6 +1045,12 @@ input[type="color"] {
   min-height: 30px;
 }
 
+.kinematic-authoring-actions button.active {
+  border-color: #30d6c8;
+  background: #133b3b;
+  color: #d9fffb;
+}
+
 .joint-visual-tools {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

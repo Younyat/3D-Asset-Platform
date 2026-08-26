@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Ejemplo completo · cargar el GLB y moverlo</title>
+<!--
+  ============================================================================
+  EJEMPLO COMPLETO Y AUTOCONTENIDO
+  ============================================================================
+  Este archivo es la respuesta a "identifico las piezas joint pero no consigo
+  moverlas". Carga el GLB exportado y lo mueve de las DOS formas:
+
+     A) reproduciendo los clips de animacion que vienen dentro del GLB
+     B) escribiendo la rotacion de cada nodo articulado desde codigo
+        (sliders manuales y secuencias con limite de velocidad)
+
+  Todo el codigo relevante esta abajo, en un solo <script type="module">,
+  comentado paso a paso. No hay nada oculto ni ningun truco: son ~120 lineas.
+
+  COMO PROBARLO
+    1. Abrir robot-arm.html y pulsar "Download GLB".
+    2. Abrir este archivo y arrastrar el .glb sobre la ventana
+       (o usar el boton "Cargar GLB").
+    3. El panel de la derecha muestra el diagnostico: que nodos y que clips
+       ha encontrado realmente el importador.
+
+  EL ERROR NUMERO 1
+    Sin la llamada `robot.update(delta)` DENTRO del bucle de render, nada se
+    mueve, aunque el clip este "reproduciendose". Ver la seccion 5.
+  ============================================================================
+-->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
+    "three/addons/controls/OrbitControls.js": "https://unpkg.com/three@0.184.0/examples/jsm/controls/OrbitControls.js",
+    "three/addons/loaders/GLTFLoader.js": "https://unpkg.com/three@0.184.0/examples/jsm/loaders/GLTFLoader.js"
+  }
+}
+</script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; background: #141517; color: #e9e6e1; }
+  #app { display: grid; grid-template-columns: 1fr 340px; height: 100%; }
+  #view { position: relative; background: #e7e2da; }
+  #view canvas { display: block; }
+  #drop { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+    padding: 40px; color: #4a4740; pointer-events: none; }
+  #drop.hidden { display: none; }
+  #drop .big { font-size: 17px; font-weight: 600; margin-bottom: 8px; color: #17181a; }
+  #drop .small { font-size: 13px; line-height: 1.6; max-width: 380px; }
+  #drop button { pointer-events: auto; margin-top: 18px; font: inherit; font-size: 13px; cursor: pointer;
+    background: #d9520c; color: #fff; border: 0; border-radius: 8px; padding: 10px 18px; }
+  #drop.over { background: rgba(217,82,12,0.12); }
+  #panel { overflow-y: auto; padding: 20px 18px 40px; background: #1a1b1e;
+    border-left: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 20px; }
+  h2 { margin: 0 0 10px; font-size: 10px; letter-spacing: 0.13em; text-transform: uppercase;
+    color: #8c8781; font-weight: 600; }
+  .stack { display: flex; flex-direction: column; gap: 6px; }
+  button.act { font: inherit; font-size: 12px; text-align: left; cursor: pointer; color: #e9e6e1;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px; padding: 8px 11px; }
+  button.act:hover { background: rgba(255,255,255,0.13); }
+  button.act.on { background: #d9520c; border-color: #d9520c; }
+  button.act:disabled { opacity: 0.35; cursor: default; }
+  .row { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
+  .row label { display: flex; justify-content: space-between; color: #c9c4bd; }
+  .row label span { color: #8c8781; font-variant-numeric: tabular-nums;
+    font-family: 'IBM Plex Mono', monospace; }
+  input[type=range] { width: 100%; accent-color: #d9520c; }
+  #log { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; line-height: 1.7;
+    background: #101114; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+    padding: 10px 11px; white-space: pre-wrap; color: #a8a49d; max-height: 260px; overflow-y: auto; }
+  #log .ok { color: #5fbf7a; }
+  #log .bad { color: #e2564a; }
+  #log .hi { color: #e8b400; }
+  .hint { font-size: 11px; line-height: 1.6; color: #8c8781; }
+  code { font-family: 'IBM Plex Mono', monospace; background: rgba(255,255,255,0.07);
+    padding: 1px 4px; border-radius: 3px; font-size: 10.5px; }
+  a { color: #e8b400; text-decoration: none; font-size: 11.5px; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <div id="drop">
+      <div>
+        <div class="big">Arrastra aquí el archivo brazo-robot-industrial.glb</div>
+        <div class="small">Expórtalo desde <code>robot-arm.html</code> → <b>Download GLB</b>.
+          Este ejemplo lo carga con <code>GLTFLoader</code>, exactamente igual que lo haría
+          la plataforma, y lo mueve con el código que hay al final de este archivo.</div>
+        <button id="pick" type="button">Cargar GLB…</button>
+        <input id="file" type="file" accept=".glb,.gltf" hidden>
+      </div>
+    </div>
+  </div>
+
+  <aside id="panel">
+    <div>
+      <h2>1 · Diagnóstico de la importación</h2>
+      <div id="log">Esperando el archivo GLB…</div>
+    </div>
+
+    <div>
+      <h2>2 · Clips incluidos en el GLB</h2>
+      <div class="stack" id="clips"></div>
+      <p class="hint" style="margin:8px 0 0">Forma A: el <code>AnimationMixer</code> escribe las
+        rotaciones de los nodos por ti.</p>
+    </div>
+
+    <div>
+      <h2>3 · Secuencias generadas en código</h2>
+      <div class="stack">
+        <button class="act" id="seq" type="button" disabled>Pick &amp; place programático</button>
+        <button class="act" id="home" type="button" disabled>Ir a Home (con rampa)</button>
+      </div>
+      <p class="hint" style="margin:8px 0 0">Forma B: cola de poses; cada paso espera a que el
+        anterior llegue a su objetivo. Independiente del framerate.</p>
+    </div>
+
+    <div>
+      <h2>4 · Control manual eje por eje</h2>
+      <div class="stack" id="joints"></div>
+    </div>
+
+    <div>
+      <h2>5 · Velocidad global</h2>
+      <div class="row">
+        <label>speedScale<span id="ssv">1.00×</span></label>
+        <input id="ss" type="range" min="10" max="200" value="100">
+      </div>
+      <p class="hint" style="margin:8px 0 0">Si al bajarlo el movimiento sigue siendo suave, la
+        interpolación es por tiempo (correcto) y no por frame.</p>
+    </div>
+
+    <a href="./GUIA-PROGRAMADOR.html">Guía del programador · tabla de fallos →</a>
+  </aside>
+</div>
+
+<script type="module">
+/* ===========================================================================
+   CODIGO COMPLETO DE INTEGRACION
+   =========================================================================== */
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RobotArmController, RIG } from './robot-controller.js';
+
+/* --- 1 · escena minima -------------------------------------------------- */
+
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+view.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#e7e2da');
+
+const camera = new THREE.PerspectiveCamera(38, 1, 0.05, 100);
+camera.position.set(2.4, 1.7, 2.9);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.75, 0);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x9a958c, 1.6));
+const key = new THREE.DirectionalLight(0xffffff, 2.1);
+key.position.set(3, 5, 2.5);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3 });
+scene.add(key);
+
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(14, 14),
+  new THREE.ShadowMaterial({ opacity: 0.22 }),
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = view;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+/* --- 2 · carga del GLB -------------------------------------------------- */
+
+let robot = null;                                   // RobotArmController
+const loader = new GLTFLoader();
+
+async function loadGLB(url) {
+  const gltf = await loader.loadAsync(url);
+
+  if (robot) scene.remove(robot.root);
+
+  gltf.scene.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  scene.add(gltf.scene);
+
+  // EL PASO CLAVE: el controlador busca los nodos J1..J6 por NOMBRE dentro
+  // de la jerarquia importada. No toca las mallas: mueve los nodos padres.
+  robot = new RobotArmController(gltf.scene, THREE, { animations: gltf.animations });
+
+  document.getElementById('drop').classList.add('hidden');
+  report(gltf);
+  buildClipButtons(gltf.animations);
+  enableControls();
+  robot.playClip('Ciclo_Pick_And_Place');
+  markClip('Ciclo_Pick_And_Place');
+}
+
+/* --- 3 · diagnostico: que ha importado realmente la plataforma ---------- */
+
+function report(gltf) {
+  const d = robot.diagnose();
+  const line = (ok, txt) => `<span class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'}</span> ${txt}`;
+  const rows = Object.entries(d.nodesFound).map(([n, ok]) => line(ok, n));
+  rows.push('');
+  rows.push(`<span class="hi">clips (${gltf.animations.length}):</span>`);
+  rows.push(...(d.clips.length ? d.clips.map((c) => line(true, c))
+                              : [line(false, 'ninguno — ¿importaste el OBJ?')]));
+  rows.push('');
+  rows.push(line(d.rigExtras !== 'ausente', `metadatos del rig: ${d.rigExtras}`));
+  document.getElementById('log').innerHTML = rows.join('\n');
+}
+
+/* --- 4 · forma A: reproducir los clips del archivo ---------------------- */
+
+function buildClipButtons(animations) {
+  const host = document.getElementById('clips');
+  host.innerHTML = '';
+  for (const clip of animations) {
+    const b = document.createElement('button');
+    b.className = 'act';
+    b.dataset.clip = clip.name;
+    b.textContent = `${clip.name} · ${clip.duration.toFixed(1)} s`;
+    b.onclick = () => {
+      robot.playClip(clip.name, { loop: clip.name !== 'Ir_A_Home' });
+      markClip(clip.name);
+      syncSliders();
+    };
+    host.appendChild(b);
+  }
+}
+function markClip(name) {
+  document.querySelectorAll('#clips .act')
+    .forEach((b) => b.classList.toggle('on', b.dataset.clip === name));
+}
+function clearClipMark() { document.querySelectorAll('#clips .act').forEach((b) => b.classList.remove('on')); }
+
+/* --- 5 · forma B: control por codigo ------------------------------------ */
+
+const sliders = {};
+for (const [key, j] of Object.entries(RIG)) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<label>${key} · ${j.name}<span>${j.home}°</span></label>`;
+  const input = document.createElement('input');
+  input.type = 'range'; input.min = j.min; input.max = j.max; input.step = 1; input.value = j.home;
+  input.disabled = true;
+  input.oninput = () => {
+    robot.stopClip();                       // sin esto, el clip sobrescribe el valor
+    clearClipMark();
+    row.querySelector('span').textContent = `${robot.setJoint(key, +input.value)}°`;
+  };
+  row.appendChild(input);
+  document.getElementById('joints').appendChild(row);
+  sliders[key] = { input, out: row.querySelector('span') };
+}
+
+const gripRow = document.createElement('div');
+gripRow.className = 'row';
+gripRow.innerHTML = '<label>J6 · pinza<span>abierta</span></label>';
+const gripInput = document.createElement('input');
+gripInput.type = 'range'; gripInput.min = 0; gripInput.max = 100; gripInput.value = 100; gripInput.disabled = true;
+gripInput.oninput = () => {
+  robot.stopClip();
+  clearClipMark();
+  const t = +gripInput.value / 100;
+  robot.setGrip(t, true);
+  gripRow.querySelector('span').textContent = t > 0.9 ? 'abierta' : t < 0.1 ? 'cerrada' : `${Math.round(t * 100)}%`;
+};
+gripRow.appendChild(gripInput);
+document.getElementById('joints').appendChild(gripRow);
+
+function syncSliders() {
+  if (!robot) return;
+  for (const [key, s] of Object.entries(sliders)) {
+    const v = Math.round(robot.current[key]);
+    s.input.value = v; s.out.textContent = `${v}°`;
+  }
+}
+
+document.getElementById('seq').onclick = () => {
+  clearClipMark();
+  robot.stopClip();
+  robot.runSequence(robot.pickAndPlace({ pickYaw: -40, placeYaw: 55 }));
+};
+document.getElementById('home').onclick = () => {
+  clearClipMark();
+  robot.stopClip();
+  robot.goHome();
+};
+document.getElementById('ss').oninput = (e) => {
+  const v = +e.target.value / 100;
+  document.getElementById('ssv').textContent = `${v.toFixed(2)}×`;
+  if (robot) robot.speedScale = v;
+};
+
+function enableControls() {
+  document.getElementById('seq').disabled = false;
+  document.getElementById('home').disabled = false;
+  Object.values(sliders).forEach((s) => { s.input.disabled = false; });
+  gripInput.disabled = false;
+}
+
+/* --- 6 · EL BUCLE DE RENDER --------------------------------------------- */
+/*  robot.update(dt) es la linea sin la cual NADA se mueve: es la que hace
+    avanzar el mixer de animacion y la que interpola las poses objetivo.     */
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = clock.getDelta();
+  if (robot) robot.update(dt);            // <<<<<< imprescindible cada frame
+  controls.update();
+  renderer.render(scene, camera);
+  if (robot && robot.action) syncSliders();
+});
+
+/* --- 7 · entrada de archivo (arrastrar o boton) ------------------------- */
+
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+document.getElementById('pick').onclick = () => fileInput.click();
+fileInput.onchange = () => fileInput.files[0] && loadGLB(URL.createObjectURL(fileInput.files[0]));
+
+addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+addEventListener('dragleave', () => drop.classList.remove('over'));
+addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  const f = e.dataTransfer.files[0];
+  if (f) loadGLB(URL.createObjectURL(f));
+});
+
+// si el GLB esta junto a este archivo, se carga solo
+loadGLB('./brazo-robot-industrial.glb').catch(() => {});
+</script>
+</body>
+</html>

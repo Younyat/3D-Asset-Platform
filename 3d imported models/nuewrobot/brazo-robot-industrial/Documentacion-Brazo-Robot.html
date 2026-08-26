@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Brazo Robot Industrial · Documentación técnica del rig</title>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  doc-page:not(:defined) { visibility: hidden; }
+  doc-page { --ink: #17181a; --muted: #5f6266; --rule: #d8d4cd; --accent: #b8460b; }
+  .doc { color: #17181a; font-family: 'Source Serif 4', Georgia, serif; font-size: 10.5pt; line-height: 1.55; }
+  .doc h1, .doc h2, .doc h3, .doc .meta, .doc table, .doc .tag { font-family: 'IBM Plex Sans', sans-serif; }
+  .doc h1 { font-size: 25pt; line-height: 1.1; margin: 0 0 6px; font-weight: 600; letter-spacing: -0.01em; }
+  .doc .sub { font-size: 12pt; color: #5f6266; margin: 0 0 18px; font-family: 'IBM Plex Sans', sans-serif; }
+  .doc .meta { font-size: 8.5pt; color: #5f6266; display: flex; gap: 26px; border-top: 1.5px solid #17181a;
+               border-bottom: 1px solid #d8d4cd; padding: 8px 0; margin-bottom: 26px; }
+  .doc .meta b { color: #17181a; font-weight: 600; display: block; text-transform: uppercase; letter-spacing: 0.08em; font-size: 7.5pt; }
+  .doc h2 { font-size: 12pt; margin: 26px 0 10px; font-weight: 600; padding-bottom: 5px; border-bottom: 1px solid #d8d4cd; }
+  .doc h3 { font-size: 10pt; margin: 18px 0 6px; font-weight: 600; }
+  .doc p { margin: 0 0 9px; }
+  .doc code, .doc pre { font-family: 'IBM Plex Mono', monospace; font-size: 8.5pt; }
+  .doc code { background: #f1eee8; padding: 1px 4px; border-radius: 3px; }
+  .doc pre { background: #f5f3ee; border: 1px solid #e2ded6; border-left: 2.5px solid #b8460b;
+             padding: 10px 12px; overflow: hidden; white-space: pre-wrap; line-height: 1.45; break-inside: avoid; margin: 8px 0 12px; }
+  .doc table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin: 6px 0 14px; }
+  .doc th { text-align: left; font-weight: 600; border-bottom: 1.5px solid #17181a; padding: 6px 8px 5px; }
+  .doc td { border-bottom: 1px solid #e6e2da; padding: 5px 8px; vertical-align: top; }
+  .doc tr { break-inside: avoid; }
+  .doc td.mono, .doc th.mono { font-family: 'IBM Plex Mono', monospace; font-size: 8pt; }
+  .doc .note { background: #faf7f1; border: 1px solid #e6e2da; padding: 10px 12px; margin: 10px 0 14px;
+               font-size: 9.5pt; break-inside: avoid; }
+  .doc ul, .doc ol { margin: 0 0 10px; padding-left: 20px; }
+  .doc li { margin-bottom: 4px; }
+  .doc .tree { font-family: 'IBM Plex Mono', monospace; font-size: 8.5pt; line-height: 1.7; background: #f5f3ee;
+               border: 1px solid #e2ded6; padding: 12px 14px; break-inside: avoid; margin-bottom: 12px; }
+  .doc .foot { font-family: 'IBM Plex Sans', sans-serif; font-size: 8pt; color: #5f6266;
+               border-top: 1px solid #d8d4cd; padding-top: 6px; }
+</style>
+</head>
+<body>
+<doc-page margin="0.85in" class="doc">
+  <div slot="footer" class="foot">Brazo Robot Industrial · Documentación del rig v1.0 · 3D Asset Platform</div>
+
+  <h1>Brazo robot industrial</h1>
+  <p class="sub">Documentación del rig, articulaciones y animaciones para integración en plataformas 3D</p>
+
+  <div class="meta">
+    <span><b>Objeto</b>IndustrialRobotArm</span>
+    <span><b>Formatos</b>GLB (animado) · OBJ+MTL (estático)</span>
+    <span><b>Ejes</b>5 rotativos + 1 pinza</span>
+    <span><b>Versión</b>rig 1.0</span>
+  </div>
+
+  <h2>1. Resumen</h2>
+  <p>Brazo robot industrial articulado, modelado en metros reales y orientado con el eje Y hacia arriba. La cadena cinemática es abierta y serial: base fija → giro de torreta → hombro → codo → muñeca → giro de herramienta → pinza de dos dedos. El movimiento está construido sobre nodos de transformación con nombre, de modo que cualquier plataforma receptora puede animar el brazo de dos formas: reproduciendo los clips incluidos en el archivo, o escribiendo directamente la rotación de cada nodo articulado (control programático o cinemática inversa).</p>
+  <p>La pinza es siempre el último eslabón de la cadena. Actúa como una mano: dos dedos paralelos que se desplazan de forma simétrica sobre el eje X local para recoger y liberar piezas.</p>
+
+  <div class="note">
+    <b>Archivo recomendado para intercambio:</b> <code>brazo-robot-industrial.glb</code>. El GLB contiene la geometría, los materiales PBR, la jerarquía completa de articulaciones, los tres clips de animación y los metadatos del rig (límites, ejes, unidades) en el campo <code>extras</code> del nodo raíz. El OBJ+MTL es únicamente para uso estático: el formato OBJ no soporta jerarquía ni animación.
+  </div>
+
+  <h2>2. Convenciones</h2>
+  <table>
+    <tbody>
+      <tr><td style="width:30%"><b>Unidades</b></td><td>metros (1 unidad = 1 m)</td></tr>
+      <tr><td><b>Orientación</b></td><td>Y arriba, Z hacia el observador, mano derecha (convención glTF)</td></tr>
+      <tr><td><b>Origen</b></td><td>centro de la placa base, apoyada sobre el suelo (y = 0)</td></tr>
+      <tr><td><b>Altura en pose Home</b></td><td>≈ 1,45 m · Alcance horizontal máximo ≈ 1,15 m</td></tr>
+      <tr><td><b>Ángulos</b></td><td>grados en esta documentación; radianes en el archivo (glTF usa cuaterniones)</td></tr>
+      <tr><td><b>Signo</b></td><td>positivo = sentido antihorario visto desde el extremo positivo del eje de giro</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Jerarquía de nodos</h2>
+  <p>Los nombres de nodo son la interfaz del rig: no deben renombrarse al importar, ya que los clips de animación y cualquier controlador externo los referencian literalmente.</p>
+  <div class="tree">IndustrialRobotArm
+└── BASE_fixed                    (base, pernos, conducto de cable)
+    └── J1_base_yaw               giro de torreta · eje Y
+        └── J2_shoulder_pitch     hombro · eje Z
+            └── J3_elbow_pitch    codo · eje Z
+                └── J4_wrist_pitch        muñeca · eje Z
+                    └── J5_tool_roll      giro de herramienta · eje Y
+                        ├── J6_gripper_finger_L   dedo izq. · traslación X
+                        └── J6_gripper_finger_R   dedo der. · traslación X</div>
+
+  <h2>4. Tabla de articulaciones</h2>
+  <table>
+    <thead>
+      <tr><th>Eje</th><th class="mono">Nodo</th><th>Tipo</th><th>Eje local</th><th>Rango</th><th>Vel. máx.</th><th>Home</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>J1</td><td class="mono">J1_base_yaw</td><td>rotativa</td><td>Y</td><td>−170° … +170°</td><td>180 °/s</td><td>0°</td></tr>
+      <tr><td>J2</td><td class="mono">J2_shoulder_pitch</td><td>rotativa</td><td>Z</td><td>−60° … +95°</td><td>140 °/s</td><td>−10°</td></tr>
+      <tr><td>J3</td><td class="mono">J3_elbow_pitch</td><td>rotativa</td><td>Z</td><td>−20° … +150°</td><td>160 °/s</td><td>+60°</td></tr>
+      <tr><td>J4</td><td class="mono">J4_wrist_pitch</td><td>rotativa</td><td>Z</td><td>−110° … +110°</td><td>250 °/s</td><td>+60°</td></tr>
+      <tr><td>J5</td><td class="mono">J5_tool_roll</td><td>rotativa</td><td>Y</td><td>−180° … +180°</td><td>320 °/s</td><td>0°</td></tr>
+      <tr><td>J6</td><td class="mono">J6_gripper_finger_L / _R</td><td>lineal</td><td>X (simétrica)</td><td>0,032 … 0,085 m</td><td>0,12 m/s</td><td>abierta</td></tr>
+    </tbody>
+  </table>
+  <p>Los mismos valores viajan dentro del archivo, en <code>extras</code> del nodo raíz (esquema <code>robot-arm-rig/1.0</code>), para que la plataforma pueda validar límites sin depender de este documento.</p>
+
+  <h3>4.1 Pinza (J6)</h3>
+  <p>Los dos dedos son nodos independientes que se mueven en espejo sobre el eje X local del nodo <code>J5_tool_roll</code>. El valor es la distancia de cada dedo al centro de la herramienta:</p>
+  <table>
+    <thead><tr><th>Estado</th><th class="mono">finger_L.position.x</th><th class="mono">finger_R.position.x</th><th>Apertura entre mordazas</th></tr></thead>
+    <tbody>
+      <tr><td>Abierta (100 %)</td><td class="mono">−0,085</td><td class="mono">+0,085</td><td>0,170 m</td></tr>
+      <tr><td>Cerrada (0 %)</td><td class="mono">−0,032</td><td class="mono">+0,032</td><td>0,064 m</td></tr>
+    </tbody>
+  </table>
+  <p>Interpolación lineal para valores intermedios: <code>x = 0,032 + 0,053 · t</code>, donde <code>t = 1</code> es abierta y <code>t = 0</code> cerrada. Para sujetar una pieza, cerrar hasta que la apertura iguale el ancho de la pieza y emparentar la pieza al nodo <code>J5_tool_roll</code> mientras dure el agarre.</p>
+
+  <h2>5. Clips de animación</h2>
+  <p>Tres clips vienen incluidos en el GLB. Todos actúan sobre los mismos nodos, por lo que pueden mezclarse por interpolación cruzada (<i>crossfade</i>) sin conflictos.</p>
+  <table>
+    <thead><tr><th class="mono">Nombre del clip</th><th>Duración</th><th>Bucle</th><th>Uso</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">Ciclo_Pick_And_Place</td><td>10,0 s</td><td>sí</td><td>Ciclo completo de producción: aproximación, descenso, cierre de pinza, elevación, transferencia con giro de herramienta, depósito, apertura y retorno a Home.</td></tr>
+      <tr><td class="mono">Ir_A_Home</td><td>2,0 s</td><td>no</td><td>Transición de repliegue a la pose de reposo. Usar al inicio de la escena o al terminar una tarea.</td></tr>
+      <tr><td class="mono">Demo_Ejes</td><td>16,2 s</td><td>sí</td><td>Verificación: cada eje barre su rango completo en orden J1→J5 y la pinza abre y cierra al final. Útil para comprobar que la importación conserva todos los ejes.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.1 Fases del ciclo Pick &amp; Place</h3>
+  <table>
+    <thead><tr><th>t (s)</th><th>Fase</th><th>J1</th><th>J2</th><th>J3</th><th>J4</th><th>J5</th><th>Pinza</th></tr></thead>
+    <tbody>
+      <tr><td>0,0</td><td>Home</td><td>0°</td><td>−10°</td><td>60°</td><td>60°</td><td>0°</td><td>abierta</td></tr>
+      <tr><td>1,5</td><td>Aproximación a recogida</td><td>−40°</td><td>50°</td><td>70°</td><td>60°</td><td>0°</td><td>abierta</td></tr>
+      <tr><td>2,6</td><td>Descenso sobre la pieza</td><td>−40°</td><td>70°</td><td>70°</td><td>40°</td><td>0°</td><td>abierta</td></tr>
+      <tr><td>3,3</td><td>Cierre (agarre)</td><td>−40°</td><td>70°</td><td>70°</td><td>40°</td><td>0°</td><td>cerrada</td></tr>
+      <tr><td>4,2</td><td>Elevación</td><td>−40°</td><td>50°</td><td>70°</td><td>60°</td><td>0°</td><td>cerrada</td></tr>
+      <tr><td>5,8</td><td>Transferencia + giro herram.</td><td>+55°</td><td>50°</td><td>70°</td><td>60°</td><td>90°</td><td>cerrada</td></tr>
+      <tr><td>6,9</td><td>Descenso en destino</td><td>+55°</td><td>70°</td><td>70°</td><td>40°</td><td>90°</td><td>cerrada</td></tr>
+      <tr><td>7,6</td><td>Apertura (suelta)</td><td>+55°</td><td>70°</td><td>70°</td><td>40°</td><td>90°</td><td>abierta</td></tr>
+      <tr><td>8,5</td><td>Retirada</td><td>+55°</td><td>50°</td><td>70°</td><td>60°</td><td>90°</td><td>abierta</td></tr>
+      <tr><td>10,0</td><td>Retorno a Home</td><td>0°</td><td>−10°</td><td>60°</td><td>60°</td><td>0°</td><td>abierta</td></tr>
+    </tbody>
+  </table>
+  <p>Los eventos de agarre y liberación ocurren en <b>t = 3,3 s</b> y <b>t = 7,6 s</b>. Si la plataforma soporta marcadores de animación, conviene colocarlos en esos instantes para emparentar y desemparentar la pieza transportada.</p>
+
+  <h2>6. Integración por plataforma</h2>
+
+  <h3>6.1 three.js / web (glTF)</h3>
+  <pre>const gltf = await new GLTFLoader().loadAsync('brazo-robot-industrial.glb');
+const robot = gltf.scene;
+const mixer = new THREE.AnimationMixer(robot);
+
+// A · reproducir un clip incluido
+const clip = THREE.AnimationClip.findByName(gltf.animations, 'Ciclo_Pick_And_Place');
+mixer.clipAction(clip).setLoop(THREE.LoopRepeat).play();
+
+// B · control articulación por articulación
+const J1 = robot.getObjectByName('J1_base_yaw');
+J1.rotation.y = THREE.MathUtils.degToRad(45);   // respetar ±170°
+
+// metadatos del rig incluidos en el archivo
+console.log(robot.userData.joints);</pre>
+
+  <h3>6.2 Unity (importación glTF / glb)</h3>
+  <ul>
+    <li>Importar con <i>glTFast</i> o <i>UnityGLTF</i>; el GLB genera un <code>AnimationClip</code> por cada clip y un <code>GameObject</code> por cada nodo articulado.</li>
+    <li>Escala de importación: 1 (Unity trabaja en metros). Marcar <i>Generate Animation → Legacy/Mecanim</i> según el uso.</li>
+    <li>Para control programático: <code>transform.Find</code> por nombre de nodo y aplicar <code>localRotation = Quaternion.Euler(0, j1, 0)</code>. Unity usa mano izquierda, por lo que el signo de los ejes Y puede invertirse; verificar con el clip <code>Demo_Ejes</code>.</li>
+    <li>La pinza se controla con <code>localPosition.x</code> de los dos nodos de dedo, en espejo.</li>
+  </ul>
+
+  <h3>6.3 Unreal Engine</h3>
+  <ul>
+    <li>Importar el GLB mediante <i>Interchange</i>. Unreal trabaja en centímetros: aplicar escala de importación 100.</li>
+    <li>El rig llega como jerarquía de actores/componentes con nombre; para control en Blueprint usar <i>Set Relative Rotation</i> sobre cada componente articulado.</li>
+    <li>Si se requiere esqueleto, convertir la jerarquía a <i>Skeletal Mesh</i> con un hueso por articulación conservando los nombres de esta tabla.</li>
+  </ul>
+
+  <h3>6.4 Blender / DCC</h3>
+  <p>Importación directa de GLB. Cada articulación aparece como <i>Empty</i> con sus curvas de animación en rotación de cuaternión. Reexportar siempre con <i>+Y up</i> y sin aplicar transformaciones a los nodos articulados, para no romper los ejes de giro.</p>
+
+  <h2>7. Control programático: reglas de movimiento</h2>
+  <ol>
+    <li><b>Respetar los límites.</b> Escribir valores fuera de rango produce autocolisión visual (el antebrazo atraviesa la torreta). Recortar todo valor entrante contra <code>limitsDeg</code>.</li>
+    <li><b>Interpolar, nunca saltar.</b> Los saltos instantáneos de ángulo no son físicamente creíbles. Interpolar hacia el objetivo limitando la velocidad por <code>maxSpeedDegPerSec</code>, con aceleración y desaceleración suaves (perfil trapezoidal o <i>ease-in-out</i>).</li>
+    <li><b>Orden de movimiento.</b> En operaciones de recogida, mover primero J1 (orientación), luego J2/J3 (extensión), después J4/J5 (orientación de herramienta) y solo al final J6. La pinza actúa siempre en último lugar, con el brazo detenido.</li>
+    <li><b>Mantener la herramienta orientada.</b> Para descender verticalmente sobre una pieza, la suma J2 + J3 + J4 debe mantenerse constante en torno a 180°: eso conserva la pinza apuntando hacia abajo mientras el brazo cambia de altura.</li>
+    <li><b>No mover la base.</b> <code>BASE_fixed</code> es estática por diseño; el brazo se traslada moviendo el nodo raíz completo.</li>
+  </ol>
+
+  <h3>7.1 Ejemplo de servo con límite de velocidad</h3>
+  <pre>const JOINTS = robot.userData.joints;             // límites del archivo
+const target = { J1: 45, J2: 20, J3: 80, J4: 80, J5: 0 };
+
+function step(dt) {
+  for (const j of JOINTS) {
+    if (j.type !== 'revolute') continue;
+    const node = robot.getObjectByName(j.name);
+    const cur  = radToDeg(node.rotation[j.axis.toLowerCase()]);
+    const goal = clamp(target[j.order], j.limitsDeg[0], j.limitsDeg[1]);
+    const max  = j.maxSpeedDegPerSec * dt;
+    const next = cur + clamp(goal - cur, -max, max);
+    node.rotation[j.axis.toLowerCase()] = degToRad(next);
+  }
+}</pre>
+
+  <h2>8. Verificación tras importar</h2>
+  <ul>
+    <li>Los seis nodos articulados existen con su nombre exacto y en el orden de la jerarquía de la sección 3.</li>
+    <li>Los tres clips aparecen con sus duraciones (10,0 / 2,0 / 16,2 s).</li>
+    <li><code>Demo_Ejes</code> se reproduce completo sin que ningún eslabón atraviese otro: confirma ejes y signos correctos.</li>
+    <li>La pinza abre y cierra de forma simétrica; los dos dedos no se cruzan en el centro.</li>
+    <li>El robot mide ≈ 1,45 m de alto en la pose Home y apoya en y = 0.</li>
+    <li>Cinco materiales PBR con nombre: <code>steel_housing</code>, <code>safety_orange</code>, <code>chrome_joint</code>, <code>cable_rubber</code>, <code>warning_yellow</code>.</li>
+  </ul>
+</doc-page>
+<script src="./doc-page.js"></script>
+</body>
+</html>

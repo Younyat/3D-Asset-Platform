@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Guía del programador · Brazo robot industrial</title>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  doc-page:not(:defined) { visibility: hidden; }
+  .doc { color: #17181a; font-family: 'Source Serif 4', Georgia, serif; font-size: 10.5pt; line-height: 1.55; }
+  .doc h1, .doc h2, .doc h3, .doc .meta, .doc table, .doc .kicker { font-family: 'IBM Plex Sans', sans-serif; }
+  .doc .kicker { font-size: 8pt; letter-spacing: 0.14em; text-transform: uppercase; color: #b8460b; font-weight: 600; margin-bottom: 8px; }
+  .doc h1 { font-size: 25pt; line-height: 1.1; margin: 0 0 6px; font-weight: 600; letter-spacing: -0.01em; }
+  .doc .sub { font-size: 12pt; color: #5f6266; margin: 0 0 18px; font-family: 'IBM Plex Sans', sans-serif; }
+  .doc .meta { font-size: 8.5pt; color: #5f6266; display: flex; gap: 26px; border-top: 1.5px solid #17181a;
+               border-bottom: 1px solid #d8d4cd; padding: 8px 0; margin-bottom: 26px; }
+  .doc .meta b { color: #17181a; font-weight: 600; display: block; text-transform: uppercase; letter-spacing: 0.08em; font-size: 7.5pt; }
+  .doc h2 { font-size: 12pt; margin: 26px 0 10px; font-weight: 600; padding-bottom: 5px; border-bottom: 1px solid #d8d4cd; }
+  .doc h3 { font-size: 10pt; margin: 18px 0 6px; font-weight: 600; }
+  .doc p { margin: 0 0 9px; }
+  .doc code, .doc pre { font-family: 'IBM Plex Mono', monospace; font-size: 8.5pt; }
+  .doc code { background: #f1eee8; padding: 1px 4px; border-radius: 3px; }
+  .doc pre { background: #f5f3ee; border: 1px solid #e2ded6; border-left: 2.5px solid #b8460b;
+             padding: 10px 12px; white-space: pre-wrap; line-height: 1.45; break-inside: avoid; margin: 8px 0 12px; }
+  .doc table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin: 6px 0 14px; }
+  .doc th { text-align: left; font-weight: 600; border-bottom: 1.5px solid #17181a; padding: 6px 8px 5px; }
+  .doc td { border-bottom: 1px solid #e6e2da; padding: 5px 8px; vertical-align: top; }
+  .doc tr { break-inside: avoid; }
+  .doc td.mono, .doc th.mono { font-family: 'IBM Plex Mono', monospace; font-size: 8pt; }
+  .doc .note { background: #faf7f1; border: 1px solid #e6e2da; border-left: 2.5px solid #b8460b;
+               padding: 11px 13px; margin: 12px 0 14px; font-size: 9.5pt; break-inside: avoid; }
+  .doc ul, .doc ol { margin: 0 0 10px; padding-left: 20px; }
+  .doc li { margin-bottom: 4px; }
+  .doc .foot { font-family: 'IBM Plex Sans', sans-serif; font-size: 8pt; color: #5f6266;
+               border-top: 1px solid #d8d4cd; padding-top: 6px; }
+</style>
+</head>
+<body>
+<doc-page margin="0.85in" class="doc">
+  <div slot="footer" class="foot">Guía del programador · Brazo robot industrial · rig 1.0</div>
+
+  <p class="kicker">Guía de integración</p>
+  <h1>Cómo mover el brazo robot</h1>
+  <p class="sub">Qué contiene el paquete, cómo se anima el rig y por qué normalmente no se mueve</p>
+
+  <div class="meta">
+    <span><b>Para</b>Programador de la plataforma</span>
+    <span><b>Modelo</b>IndustrialRobotArm · rig 1.0</span>
+    <span><b>Archivo clave</b>brazo-robot-industrial.glb</span>
+  </div>
+
+  <h2>1. Lo primero: el movimiento no está en la malla</h2>
+  <p>El brazo no es un objeto rígido con una animación “pegada” encima. Es una <b>cadena de nodos de transformación anidados</b>. Cada articulación es un nodo vacío con nombre; las piezas visibles (carcasas, brazo, antebrazo, pinza) son hijas de esos nodos. Girar un nodo arrastra todo lo que cuelga por debajo de él, igual que un hombro arrastra el codo y la mano.</p>
+  <p>Por eso hay exactamente dos maneras válidas de moverlo, y ninguna consiste en tocar las mallas:</p>
+  <ol>
+    <li><b>Reproducir un clip</b> incluido en el GLB (<code>Ciclo_Pick_And_Place</code>, <code>Ir_A_Home</code>, <code>Demo_Ejes</code>). El clip escribe las rotaciones de los nodos fotograma a fotograma.</li>
+    <li><b>Escribir la rotación de cada nodo</b> desde código, en cada frame. Es lo que hace <code>robot-controller.js</code>.</li>
+  </ol>
+
+  <div class="note">
+    <b>El error más frecuente.</b> Si se importa el GLB y se intenta rotar el objeto raíz, o la malla <code>upper_arm</code>, o se aplica una animación al <i>mesh</i> en lugar de al nodo articulado, el brazo no se articula: se mueve en bloque o no se mueve en absoluto. Los nombres que hay que buscar son los de la sección 3, y todos empiezan por <code>J</code>.
+  </div>
+
+  <h2>2. El malentendido concreto: una animación por pieza</h2>
+  <p>Si al mover el brazo cada pieza se desplaza por separado y la figura se desarma, el problema no es el modelo: es que se está animando <b>cada malla de forma independiente</b>, cada una con su propia trayectoria en el espacio del mundo. Eso obliga a calcular a mano la posición de todas las piezas en todo momento, y es imposible de mantener.</p>
+  <p>El rig no funciona así. Solo hay que escribir <b>un ángulo por articulación</b> y la jerarquía hace el resto:</p>
+  <table>
+    <thead><tr><th style="width:50%">Enfoque incorrecto</th><th>Enfoque del rig</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Una trayectoria de posición y rotación por cada malla (<code>upper_arm</code>, <code>forearm</code>, <code>wrist_link</code>, cada dedo…), en coordenadas de mundo.</td>
+        <td>Un valor escalar por articulación: <code>J1=45°, J2=30°, J3=80°, J4=70°, J5=0°, pinza=0</code>. Seis números describen la pose completa.</td>
+      </tr>
+      <tr>
+        <td>Al cambiar el hombro hay que recalcular a mano codo, muñeca y pinza, o el brazo se rompe.</td>
+        <td>Al girar <code>J2_shoulder_pitch</code>, el codo, la muñeca y la pinza le siguen automáticamente porque son sus hijos.</td>
+      </tr>
+      <tr>
+        <td>Las mallas se separan, se atraviesan o quedan flotando.</td>
+        <td>Los eslabones nunca se separan: están unidos por la jerarquía.</td>
+      </tr>
+      <tr>
+        <td>Se animan nodos hoja (<i>mesh</i>).</td>
+        <td>Se animan los nodos padre <code>J1…J6</code>. Las mallas <b>no se tocan jamás</b>.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Dicho de otro modo: identificar los nodos <code>joint</code> era el paso correcto, pero lo que hay que escribir en ellos es <b>solo la rotación local en su único eje</b> — no una posición, no una rotación completa, y nunca sobre la malla hija. Una articulación rotativa tiene <b>un grado de libertad</b>: un número.</p>
+  <pre>// INCORRECTO — mover las piezas por separado
+forearmMesh.position.set(x, y, z);
+forearmMesh.rotation.set(rx, ry, rz);
+
+// CORRECTO — un ángulo en el nodo articulado; los hijos le siguen
+robot.getObjectByName('J3_elbow_pitch').rotation.z = 80 * Math.PI / 180;</pre>
+  <div class="note">
+    <b>Ejemplo ejecutable.</b> <code>EJEMPLO-COMPLETO.html</code> del paquete es una integración
+    completa en un solo archivo: se le arrastra el GLB exportado y lo mueve de las dos formas
+    (clips del archivo y control por código), con un panel de diagnóstico que muestra qué nodos
+    y qué clips ha encontrado realmente el importador. Son unas 120 líneas de código, todas
+    visibles y comentadas en el propio archivo.
+  </div>
+
+  <h2>3. Diagnóstico rápido: por qué no se mueve</h2>
+  <table>
+    <thead><tr><th style="width:34%">Síntoma</th><th>Causa habitual</th><th>Solución</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Se ve el robot pero está totalmente inmóvil</td>
+        <td>No se llama al actualizador en el bucle de render</td>
+        <td>En three.js: <code>mixer.update(delta)</code> cada frame. Con el controlador: <code>robot.update(delta)</code>. Sin esa llamada por frame, ninguna animación avanza.</td>
+      </tr>
+      <tr>
+        <td>Se reproduce el clip pero nada cambia</td>
+        <td>El <code>AnimationMixer</code> se creó sobre un objeto distinto del que está en la escena (por ejemplo un clon)</td>
+        <td>Crear el mixer sobre <b>el mismo</b> objeto añadido a la escena: <code>new AnimationMixer(gltf.scene)</code>. Si se clona, usar <code>SkeletonUtils.clone()</code>.</td>
+      </tr>
+      <tr>
+        <td><code>gltf.animations</code> está vacío</td>
+        <td>Se descargó el OBJ, o el importador de la plataforma tiene la animación desactivada</td>
+        <td>El OBJ <b>no soporta animación ni jerarquía</b>: usar el GLB. En Unity/Unreal activar la importación de animaciones.</td>
+      </tr>
+      <tr>
+        <td>El brazo se mueve en bloque, sin articularse</td>
+        <td>Se rota el nodo raíz o una malla, no los nodos <code>J*</code></td>
+        <td>Buscar por nombre: <code>getObjectByName('J2_shoulder_pitch')</code> y rotar ese nodo.</td>
+      </tr>
+      <tr>
+        <td>Se rota el nodo correcto y no pasa nada</td>
+        <td>Un clip activo sobrescribe la rotación cada frame</td>
+        <td>Detener la acción antes del control manual: <code>action.stop()</code> o <code>robot.stopClip()</code>.</td>
+      </tr>
+      <tr>
+        <td>Gira el eje equivocado</td>
+        <td>Se usó el eje global en vez del local, o la plataforma es de mano izquierda (Unity/Unreal)</td>
+        <td>Usar <b>rotación local</b> (<code>localRotation</code> / <code>Set Relative Rotation</code>). Verificar signos con el clip <code>Demo_Ejes</code>.</td>
+      </tr>
+      <tr>
+        <td>El brazo se retuerce sobre sí mismo</td>
+        <td>Se mezclan <code>rotation</code> (Euler) y <code>quaternion</code> sobre el mismo nodo</td>
+        <td>Elegir uno solo. El rig anima cuaterniones; para control manual usar <code>rotation[eje]</code> solo si no hay clip activo.</td>
+      </tr>
+      <tr>
+        <td>Los eslabones se atraviesan</td>
+        <td>Ángulos fuera de rango</td>
+        <td>Recortar contra <code>limitsDeg</code> de <code>rig.json</code> antes de escribir.</td>
+      </tr>
+      <tr>
+        <td>La pinza se cruza o se deforma</td>
+        <td>Se rotan los dedos, o se mueve solo uno</td>
+        <td>Los dedos son <b>traslación</b> en X, no rotación, y van siempre en espejo: <code>L.x = −x</code>, <code>R.x = +x</code>.</td>
+      </tr>
+      <tr>
+        <td>El robot mide 1,45 unidades y parece diminuto</td>
+        <td>La plataforma trabaja en centímetros</td>
+        <td>El modelo está en metros. Unity: escala 1. Unreal: escala de importación 100.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3.1 Comprobación en una línea</h3>
+  <p>Antes de escribir lógica, confirmar que la importación conservó el rig:</p>
+  <pre>const robot = new RobotArmController(gltf.scene, THREE, { animations: gltf.animations });
+console.table(robot.diagnose());
+// nodesFound: los 7 nombres deben ser true
+// clips: Ciclo_Pick_And_Place (10.0s), Ir_A_Home (2.0s), Demo_Ejes (16.2s)
+// rigExtras: 'robot-arm-rig/1.0'</pre>
+  <p>Si algún nodo sale <code>false</code>, el importador renombró la jerarquía: hay que corregir el importador, no el código de movimiento.</p>
+
+  <h2>4. Los siete nodos que se mueven</h2>
+  <table>
+    <thead><tr><th>Eje</th><th class="mono">Nodo (nombre exacto)</th><th>Tipo</th><th>Propiedad a escribir</th><th>Rango</th><th>Vel. máx.</th></tr></thead>
+    <tbody>
+      <tr><td>J1</td><td class="mono">J1_base_yaw</td><td>rotativa</td><td class="mono">rotation.y</td><td>−170° … +170°</td><td>180 °/s</td></tr>
+      <tr><td>J2</td><td class="mono">J2_shoulder_pitch</td><td>rotativa</td><td class="mono">rotation.z</td><td>−60° … +95°</td><td>140 °/s</td></tr>
+      <tr><td>J3</td><td class="mono">J3_elbow_pitch</td><td>rotativa</td><td class="mono">rotation.z</td><td>−20° … +150°</td><td>160 °/s</td></tr>
+      <tr><td>J4</td><td class="mono">J4_wrist_pitch</td><td>rotativa</td><td class="mono">rotation.z</td><td>−110° … +110°</td><td>250 °/s</td></tr>
+      <tr><td>J5</td><td class="mono">J5_tool_roll</td><td>rotativa</td><td class="mono">rotation.y</td><td>−180° … +180°</td><td>320 °/s</td></tr>
+      <tr><td>J6</td><td class="mono">J6_gripper_finger_L</td><td>lineal</td><td class="mono">position.x</td><td>−0,085 … −0,032 m</td><td>0,12 m/s</td></tr>
+      <tr><td>J6</td><td class="mono">J6_gripper_finger_R</td><td>lineal</td><td class="mono">position.x</td><td>+0,032 … +0,085 m</td><td>0,12 m/s</td></tr>
+    </tbody>
+  </table>
+  <p>Ángulos en radianes al escribir en three.js (<code>grados × Math.PI / 180</code>). Los mismos datos, en forma legible por máquina, están en <code>rig.json</code> y también dentro del GLB, en <code>root.userData</code> (campo <code>extras</code> del glTF).</p>
+
+  <h2>5. Integración mínima que funciona</h2>
+  <pre>import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RobotArmController } from './robot-controller.js';
+
+const gltf = await new GLTFLoader().loadAsync('brazo-robot-industrial.glb');
+scene.add(gltf.scene);
+
+const robot = new RobotArmController(gltf.scene, THREE, { animations: gltf.animations });
+
+robot.playClip('Ciclo_Pick_And_Place');        // animación incluida, en bucle
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  robot.update(clock.getDelta());              // ← imprescindible cada frame
+  renderer.render(scene, camera);
+});</pre>
+
+  <h3>5.1 Control articulado desde código</h3>
+  <pre>robot.stopClip();                       // libera los nodos del clip
+
+// inmediato (sin suavizado)
+robot.setJoint('J1', 45);
+robot.setGrip(0);                       // 0 cerrada · 1 abierta
+
+// con límite de velocidad: update() interpola hacia el objetivo
+robot.moveTo({ J1: 45, J2: 30, J3: 80, J4: 70, J5: 0, grip: 1 });
+robot.speedScale = 0.6;                 // cámara lenta
+
+if (robot.isSettled()) { /* movimiento terminado */ }</pre>
+
+  <h3>5.2 Secuencia de recogida generada en código</h3>
+  <pre>robot.runSequence(robot.pickAndPlace({
+  pickYaw: -40,
+  placeYaw: 55,
+  onGrasp:   () => pieza.parent = robot.nodes.J5,   // la pieza viaja con la herramienta
+  onRelease: () => scene.attach(pieza),             // conserva la transformación mundial
+}));</pre>
+  <p>Cada paso de la cola espera a que el anterior haya llegado a su objetivo, así que la secuencia es independiente del framerate. <code>pickAndPlace()</code> reproduce la lógica del clip incluido, pero parametrizable: es el punto de partida para trayectorias reales.</p>
+
+  <h2>6. Reglas de movimiento creíble</h2>
+  <ol>
+    <li><b>Nunca saltos de ángulo.</b> Interpolar limitando la velocidad de cada eje (<code>maxSpeedDegPerSec</code>) con aceleración y frenada suaves. Un salto instantáneo delata inmediatamente que no hay física.</li>
+    <li><b>Orden de movimiento:</b> J1 (orientar) → J2/J3 (extender) → J4/J5 (orientar herramienta) → J6 (pinza). La pinza actúa con el brazo detenido.</li>
+    <li><b>Herramienta vertical:</b> para bajar recto sobre una pieza, mantener <code>J2 + J3 + J4 ≈ 180°</code> mientras cambian J2 y J3. Es la relación que usan todas las fases de descenso del clip.</li>
+    <li><b>Pausa en el agarre.</b> Dejar 0,3–0,5 s entre el fin del descenso y el cierre de la pinza, y otro tanto antes de elevar. Sin esas pausas el ciclo parece animación, no maquinaria.</li>
+    <li><b>La base no se mueve.</b> <code>BASE_fixed</code> es estática por diseño; para desplazar el robot se mueve el nodo raíz completo.</li>
+  </ol>
+
+  <h2>7. Contenido del paquete</h2>
+  <table>
+    <thead><tr><th class="mono" style="width:34%">Archivo</th><th>Qué es y para qué sirve</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">robot-arm.html</td><td>Visor interactivo de referencia. Reproduce los tres clips, permite mover cada eje con sliders y <b>exporta el GLB y el OBJ</b>. Es también el ejemplo funcional completo: el código que lo mueve es <code>robot-arm.js</code>.</td></tr>
+      <tr><td class="mono">robot-arm.js</td><td>Construcción del modelo, definición del rig y generación de los tres clips por keyframes. Fuente de verdad de la geometría y de las animaciones.</td></tr>
+      <tr><td class="mono">robot-controller.js</td><td>Controlador reutilizable: <code>setJoint</code>, <code>moveTo</code> con límite de velocidad, <code>setGrip</code>, colas de secuencias, <code>playClip</code> y <code>diagnose()</code>. Módulo ES, sin dependencias.</td></tr>
+      <tr><td class="mono">rig.json</td><td>Especificación legible por máquina: jerarquía, ejes, límites, velocidades, poses nombradas y <b>todos los keyframes de los tres clips</b>. Para reconstruir las animaciones en cualquier motor.</td></tr>
+      <tr><td class="mono">brazo-robot-industrial.urdf</td><td>La misma cadena cinemática en formato URDF (convención ROS, Z arriba) con masas, inercias, esfuerzos y colisiones: para MoveIt, Gazebo, PyBullet o Isaac Sim.</td></tr>
+      <tr><td class="mono">Documentacion-Brazo-Robot.html</td><td>Documentación del rig: convenciones, tablas de articulaciones, fases del ciclo e integración por plataforma (three.js, Unity, Unreal, Blender).</td></tr>
+      <tr><td class="mono">EJEMPLO-COMPLETO.html</td><td><b>Integración completa ejecutable en un solo archivo.</b> Se le arrastra el GLB exportado y lo mueve: clips del archivo, secuencias por código, sliders por eje y panel de diagnóstico de la importación. ~120 líneas comentadas.</td></tr>
+      <tr><td class="mono">GUIA-PROGRAMADOR.html</td><td>Este documento.</td></tr>
+      <tr><td class="mono">three-d-stage.js · doc-page.js</td><td>Componentes de apoyo del visor y de la maquetación. No forman parte del rig.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <b>Cómo obtener el modelo.</b> Abrir <code>robot-arm.html</code> en un navegador con conexión (three.js se carga desde CDN) y pulsar <b>Download GLB</b>. Ese archivo lleva dentro la geometría, los materiales PBR, la jerarquía de articulaciones, los tres clips y los metadatos del rig. El OBJ+MTL es solo para uso estático.
+  </div>
+
+  <h2>8. Lista de verificación antes de dar por buena la integración</h2>
+  <ul>
+    <li>Los siete nodos existen con su nombre exacto y en el orden de la jerarquía.</li>
+    <li>Los tres clips aparecen con sus duraciones: 10,0 / 2,0 / 16,2 s.</li>
+    <li><code>Demo_Ejes</code> se reproduce completo sin que ningún eslabón atraviese otro: confirma ejes y signos correctos.</li>
+    <li>La pinza abre y cierra en espejo; los dedos no se cruzan en el centro.</li>
+    <li>El robot mide ≈ 1,45 m en pose Home y apoya en y = 0.</li>
+    <li>Tras <code>stopClip()</code>, mover un eje por código responde de inmediato.</li>
+    <li>Con <code>speedScale = 0.25</code> el movimiento sigue siendo suave: confirma que la interpolación es por tiempo y no por frame.</li>
+  </ul>
+</doc-page>
+<script src="./doc-page.js"></script>
+</body>
+</html>

@@ -44,12 +44,92 @@ export type JointValidationResult = {
   testedAt?: string;
 };
 
+export type TopologyProperties = {
+  watertight: boolean;
+  manifold: boolean;
+  consistentlyOriented: boolean;
+  boundaryEdgeCount: number;
+  nonManifoldEdgeCount: number;
+};
+
+export type GeometricProperties = {
+  aabbCenter: Vector3Tuple;
+  surfaceCentroid?: Vector3Tuple;
+  volumeCentroid?: Vector3Tuple;
+  principalAxes?: [Vector3Tuple, Vector3Tuple, Vector3Tuple];
+  dimensions: Vector3Tuple;
+  topology: TopologyProperties;
+};
+
+export type MassProperties = {
+  centerOfMass?: Vector3Tuple;
+  volume?: number;
+  mass?: number;
+  inertiaTensor?: [Vector3Tuple, Vector3Tuple, Vector3Tuple];
+  assumption: 'uniform-density' | 'material-defined';
+  valid: boolean;
+};
+
+export type JointFrameEvidence = {
+  primitive?: 'cylinder' | 'circle' | 'plane' | 'sphere';
+  residual?: number;
+  normalizedResidual?: number;
+  supportRatio?: number;
+  angularCoverageDeg?: number;
+  axialCoverage?: number;
+  contactAgreement?: number;
+  pcaAxisAgreementDeg?: number;
+  userSeeded?: boolean;
+  evidenceLevel: 'low' | 'medium' | 'high';
+  messages: string[];
+};
+
+export type JointFrame = {
+  origin: Vector3Tuple;
+  axis: Vector3Tuple;
+  orientation: QuaternionTuple;
+  source: 'geometry' | 'assembly-contact' | 'user-seeded' | 'manual' | 'imported';
+  evidence: JointFrameEvidence;
+  status: 'candidate' | 'accepted' | 'rejected' | 'manual';
+  axisSignConvention?: 'parent-to-child' | 'user-defined' | 'canonical';
+};
+
+export type CylinderCandidate = {
+  axisPoint: Vector3Tuple;
+  axisDirection: Vector3Tuple;
+  radius: number;
+  radialResidualRms: number;
+  radialResidualMedian: number;
+  supportRatio: number;
+  angularCoverageDeg: number;
+  axialCoverage: number;
+  inlierCount: number;
+  totalCount: number;
+};
+
+export type JointFrameCandidate = {
+  frame: JointFrame;
+  motionType: 'revolute' | 'prismatic' | 'fixed' | 'unknown';
+  cylinder?: CylinderCandidate;
+  seedPoint?: Vector3Tuple;
+};
+
+export type MechanicalAdjacency = {
+  partA: string;
+  partB: string;
+  minimumDistance: number;
+  coaxialCandidates: Array<{ axisPoint: Vector3Tuple; axisDirection: Vector3Tuple; lineDistance: number; angularErrorDeg: number }>;
+  metadata?: Record<string, unknown>;
+};
+
 export type MechanicalPart = {
   id: string;
   name: string;
   meshObjectIds: string[];
   localFrame: Transform3D;
   bounds: Bounds3D;
+  geometricProperties?: GeometricProperties;
+  massProperties?: MassProperties;
   orientedBounds?: OrientedBounds3D;
   static: boolean;
   visible: boolean;
@@ -70,6 +150,8 @@ export type KinematicJoint = {
   };
   axis: Vector3Tuple;
   axis2?: Vector3Tuple;
+  jointFrame?: JointFrame;
+  inferredCandidate?: JointFrameCandidate;
   motionProfile?: JointMotionProfile;
   motionPlane?: JointMotionPlane;
   drivenPoint?: Vector3Tuple;
@@ -107,11 +189,30 @@ export type KinematicLogicalControl = {
   }>;
 };
 
+export type KinematicMotionKeyframe = {
+  time: number;
+  label?: string;
+  jointValues: Record<string, number>;
+};
+
+export type KinematicMotionClip = {
+  id: string;
+  name: string;
+  duration: number;
+  loop: boolean;
+  source: 'imported' | 'manual' | 'generated';
+  description?: string;
+  keyframes: KinematicMotionKeyframe[];
+};
+
 export type KinematicGraph = {
   parts: MechanicalPart[];
   joints: KinematicJoint[];
   rootPartId: string;
   logicalControls?: KinematicLogicalControl[];
+  motionClips?: KinematicMotionClip[];
+  mechanicalAdjacency?: MechanicalAdjacency[];
+  analysisVersion?: string;
 };
 
 export type KinematicState = {

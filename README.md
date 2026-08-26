@@ -245,6 +245,12 @@ Las siguientes capturas animadas se generan desde tres articulaciones distintas 
 
 ![Rotacion del cabezal del robot](docs/readme-assets/piece-head-rotation.gif)
 
+**Brazo industrial completo**
+
+El paquete `brazo-robot-industrial.obj` se recupera como rig funcional aunque el OBJ sea estatico: la plataforma reconstruye J1-J6 desde las mallas, aplica pivotes medidos sobre la geometria real y reproduce el ciclo profesional completo.
+
+![Movimiento completo del brazo robot industrial](docs/readme-assets/robot-arm-full-motion.gif)
+
 La geometria por si sola no puede demostrar la funcion fisica real de una pieza sin sus conexiones, contactos o especificacion mecanica. Por eso la plataforma automatiza el calculo y las invariantes geometricas, pero deja al usuario validar la funcion mecanica observada antes de aceptarla. Esta separacion evita inventar articulaciones falsas.
 
 ### Persistencia De M1
@@ -415,6 +421,7 @@ Para generar las tres demostraciones mecanicas del README:
 $env:PIECE_MOTION_JOINT_INDEX='0'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-rotation-demo.gif'; npm.cmd run docs:capture:piece-motion
 $env:PIECE_MOTION_JOINT_INDEX='1'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-link-rotation.gif'; npm.cmd run docs:capture:piece-motion
 $env:PIECE_MOTION_JOINT_INDEX='2'; $env:PIECE_MOTION_GIF_OUTPUT='docs/readme-assets/piece-head-rotation.gif'; npm.cmd run docs:capture:piece-motion
+npm.cmd run docs:capture:robot-arm-motion
 ```
 
 El aviso de bundle grande es esperado porque la aplicacion incluye Three.js y varios loaders 3D. No bloquea la build de produccion.

@@ -1,0 +1,190 @@
+<?xml version="1.0"?>
+<!--
+  brazo_robot_industrial.urdf — descripcion cinematica en formato URDF.
+
+  NOTA DE CONVENCION: URDF/ROS usa Z arriba; el modelo GLB usa Y arriba.
+  Este archivo expresa la MISMA cadena cinematica en convencion ROS:
+    eje de giro de la torreta  -> Z
+    ejes de cabeceo            -> Y
+  Los limites y las longitudes de eslabon son identicos al rig del GLB.
+  Limites en radianes (URDF) equivalentes a los grados de rig.json.
+
+  Uso: validacion cinematica, planificacion de trayectorias (MoveIt),
+  simulacion (Gazebo, PyBullet, Isaac Sim). Para render usar el GLB.
+-->
+<robot name="brazo_robot_industrial">
+
+  <material name="steel_housing">  <color rgba="0.27 0.29 0.32 1"/></material>
+  <material name="safety_orange">  <color rgba="0.85 0.32 0.05 1"/></material>
+  <material name="chrome_joint">   <color rgba="0.81 0.82 0.84 1"/></material>
+  <material name="cable_rubber">   <color rgba="0.11 0.11 0.12 1"/></material>
+
+  <!-- ============ eslabones ============ -->
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.19"/>
+      <geometry><cylinder radius="0.34" length="0.38"/></geometry>
+      <material name="safety_orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.19"/>
+      <geometry><cylinder radius="0.36" length="0.38"/></geometry>
+    </collision>
+    <inertial><mass value="42.0"/><origin xyz="0 0 0.19"/>
+      <inertia ixx="1.6" ixy="0" ixz="0" iyy="1.6" iyz="0" izz="2.4"/></inertial>
+  </link>
+
+  <link name="turret_link">
+    <visual>
+      <origin xyz="0.02 0 0.30"/>
+      <geometry><box size="0.40 0.34 0.60"/></geometry>
+      <material name="steel_housing"/>
+    </visual>
+    <collision><origin xyz="0.02 0 0.30"/><geometry><box size="0.40 0.34 0.60"/></geometry></collision>
+    <inertial><mass value="18.0"/><origin xyz="0.02 0 0.30"/>
+      <inertia ixx="0.7" ixy="0" ixz="0" iyy="0.7" iyz="0" izz="0.5"/></inertial>
+  </link>
+
+  <link name="upper_arm_link">
+    <visual>
+      <origin xyz="0 0 0.31"/>
+      <geometry><box size="0.22 0.26 0.62"/></geometry>
+      <material name="safety_orange"/>
+    </visual>
+    <collision><origin xyz="0 0 0.31"/><geometry><box size="0.22 0.26 0.62"/></geometry></collision>
+    <inertial><mass value="12.0"/><origin xyz="0 0 0.31"/>
+      <inertia ixx="0.42" ixy="0" ixz="0" iyy="0.42" iyz="0" izz="0.09"/></inertial>
+  </link>
+
+  <link name="forearm_link">
+    <visual>
+      <origin xyz="0 0 0.23"/>
+      <geometry><box size="0.17 0.19 0.46"/></geometry>
+      <material name="safety_orange"/>
+    </visual>
+    <collision><origin xyz="0 0 0.23"/><geometry><box size="0.17 0.19 0.46"/></geometry></collision>
+    <inertial><mass value="7.0"/><origin xyz="0 0 0.23"/>
+      <inertia ixx="0.14" ixy="0" ixz="0" iyy="0.14" iyz="0" izz="0.04"/></inertial>
+  </link>
+
+  <link name="wrist_link">
+    <visual>
+      <origin xyz="0 0 0.07"/>
+      <geometry><cylinder radius="0.08" length="0.14"/></geometry>
+      <material name="chrome_joint"/>
+    </visual>
+    <collision><origin xyz="0 0 0.07"/><geometry><cylinder radius="0.09" length="0.14"/></geometry></collision>
+    <inertial><mass value="2.4"/><origin xyz="0 0 0.07"/>
+      <inertia ixx="0.006" ixy="0" ixz="0" iyy="0.006" iyz="0" izz="0.006"/></inertial>
+  </link>
+
+  <link name="tool_link">
+    <visual>
+      <origin xyz="0 0 0.075"/>
+      <geometry><box size="0.18 0.14 0.09"/></geometry>
+      <material name="steel_housing"/>
+    </visual>
+    <collision><origin xyz="0 0 0.075"/><geometry><box size="0.18 0.14 0.09"/></geometry></collision>
+    <inertial><mass value="1.8"/><origin xyz="0 0 0.075"/>
+      <inertia ixx="0.004" ixy="0" ixz="0" iyy="0.004" iyz="0" izz="0.004"/></inertial>
+  </link>
+
+  <link name="finger_left_link">
+    <visual><origin xyz="0 0 0.09"/><geometry><box size="0.045 0.09 0.18"/></geometry>
+      <material name="steel_housing"/></visual>
+    <collision><origin xyz="0 0 0.09"/><geometry><box size="0.045 0.09 0.18"/></geometry></collision>
+    <inertial><mass value="0.35"/><origin xyz="0 0 0.09"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0004"/></inertial>
+  </link>
+
+  <link name="finger_right_link">
+    <visual><origin xyz="0 0 0.09"/><geometry><box size="0.045 0.09 0.18"/></geometry>
+      <material name="steel_housing"/></visual>
+    <collision><origin xyz="0 0 0.09"/><geometry><box size="0.045 0.09 0.18"/></geometry></collision>
+    <inertial><mass value="0.35"/><origin xyz="0 0 0.09"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.0004"/></inertial>
+  </link>
+
+  <!-- ============ articulaciones ============ -->
+
+  <!-- J1 · giro de torreta · GLB: J1_base_yaw (eje Y) -->
+  <joint name="J1_base_yaw" type="revolute">
+    <parent link="base_link"/>
+    <child  link="turret_link"/>
+    <origin xyz="0 0 0.38" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.9671" upper="2.9671" effort="600" velocity="3.1416"/>
+    <dynamics damping="1.2" friction="0.4"/>
+  </joint>
+
+  <!-- J2 · hombro · GLB: J2_shoulder_pitch (eje Z) -->
+  <joint name="J2_shoulder_pitch" type="revolute">
+    <parent link="turret_link"/>
+    <child  link="upper_arm_link"/>
+    <origin xyz="0.02 0 0.52" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.0472" upper="1.6581" effort="900" velocity="2.4435"/>
+    <dynamics damping="1.5" friction="0.5"/>
+  </joint>
+
+  <!-- J3 · codo · GLB: J3_elbow_pitch (eje Z) -->
+  <joint name="J3_elbow_pitch" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child  link="forearm_link"/>
+    <origin xyz="0 0 0.62" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.3491" upper="2.6180" effort="600" velocity="2.7925"/>
+    <dynamics damping="1.0" friction="0.35"/>
+  </joint>
+
+  <!-- J4 · muneca · GLB: J4_wrist_pitch (eje Z) -->
+  <joint name="J4_wrist_pitch" type="revolute">
+    <parent link="forearm_link"/>
+    <child  link="wrist_link"/>
+    <origin xyz="0 0 0.46" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.9199" upper="1.9199" effort="250" velocity="4.3633"/>
+    <dynamics damping="0.6" friction="0.2"/>
+  </joint>
+
+  <!-- J5 · giro de herramienta · GLB: J5_tool_roll (eje Y) -->
+  <joint name="J5_tool_roll" type="revolute">
+    <parent link="wrist_link"/>
+    <child  link="tool_link"/>
+    <origin xyz="0 0 0.14" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.1416" upper="3.1416" effort="150" velocity="5.5851"/>
+    <dynamics damping="0.4" friction="0.15"/>
+  </joint>
+
+  <!-- J6 · pinza, dedo izquierdo · GLB: J6_gripper_finger_L -->
+  <joint name="J6_gripper_finger_L" type="prismatic">
+    <parent link="tool_link"/>
+    <child  link="finger_left_link"/>
+    <origin xyz="-0.032 0 0.12" rpy="0 0 0"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="0.0" upper="0.053" effort="120" velocity="0.12"/>
+    <dynamics damping="0.2" friction="0.1"/>
+  </joint>
+
+  <!-- J6 · pinza, dedo derecho (espejo: mimic del izquierdo) -->
+  <joint name="J6_gripper_finger_R" type="prismatic">
+    <parent link="tool_link"/>
+    <child  link="finger_right_link"/>
+    <origin xyz="0.032 0 0.12" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0.0" upper="0.053" effort="120" velocity="0.12"/>
+    <mimic joint="J6_gripper_finger_L" multiplier="1.0" offset="0.0"/>
+    <dynamics damping="0.2" friction="0.1"/>
+  </joint>
+
+  <!-- marco del efector final: punto de agarre entre las mordazas -->
+  <link name="tcp"/>
+  <joint name="tool_tcp" type="fixed">
+    <parent link="tool_link"/>
+    <child  link="tcp"/>
+    <origin xyz="0 0 0.26" rpy="0 0 0"/>
+  </joint>
+
+</robot>

@@ -99,14 +99,25 @@ const objectPositionByName = (scene: THREE.Object3D) => {
   return positions;
 };
 
+const objectBoundsByName = (scene: THREE.Object3D) => {
+  const bounds = new Map<string, Bounds3D>();
+  scene.traverse((object) => {
+    if (!object.name || bounds.has(object.name)) return;
+    const next = boundsFromObject(object);
+    if (next.size.some((value) => value > 0)) bounds.set(object.name, next);
+  });
+  return bounds;
+};
+
 export const createKinematicGraphFromLegacyJoints = (scene: THREE.Object3D, joints: ImportedJointPose[]): KinematicGraph => {
   const rootPart = makeRootPart(scene);
   const positions = objectPositionByName(scene);
+  const bounds = objectBoundsByName(scene);
   const parts: MechanicalPart[] = [rootPart];
 
   const graphJoints = joints.map((joint, index) => {
     const childPartId = id('part', `${index + 1}_${joint.name || 'joint'}`);
-    const originPosition = positions.get(joint.name) ?? rootPart.bounds.center;
+    const originPosition = positions.get(joint.name) ?? [0, 0, 0];
     parts.push({
       id: childPartId,
       name: joint.label ?? joint.name,
@@ -116,7 +127,12 @@ export const createKinematicGraphFromLegacyJoints = (scene: THREE.Object3D, join
         rotation: [0, 0, 0],
         scale: [1, 1, 1],
       },
-      bounds: rootPart.bounds,
+      bounds: bounds.get(joint.name) ?? {
+        min: [0, 0, 0],
+        max: [0, 0, 0],
+        size: [0, 0, 0],
+        center: [0, 0, 0],
+      },
       static: false,
       visible: true,
       source: 'imported',

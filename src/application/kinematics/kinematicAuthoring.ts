@@ -1,6 +1,7 @@
 import type {
   JointType,
   JointMotionPlane,
+  JointFrame,
   KinematicGraph,
   KinematicJoint,
   KinematicState,
@@ -44,6 +45,48 @@ const normalizeQuaternion = (rotation: QuaternionTuple): QuaternionTuple | undef
   const length = Math.hypot(rotation[0], rotation[1], rotation[2], rotation[3]);
   if (length <= EPSILON) return undefined;
   return [rotation[0] / length, rotation[1] / length, rotation[2] / length, rotation[3] / length];
+};
+
+const jointFrameFromLegacy = (joint: KinematicJoint): JointFrame | undefined => {
+  const axis = normalizeAxis(joint.axis);
+  if (!axis) return undefined;
+  const helper: Vector3Tuple = Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const x = normalizeAxis(vectorSubtract(helper, vectorScale(axis, vectorDot(helper, axis))));
+  const y = x ? normalizeAxis(vectorCross(axis, x)) : undefined;
+  if (!x || !y) return undefined;
+  const trace = x[0] + y[1] + axis[2];
+  let rotation: QuaternionTuple;
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    rotation = [(y[2] - axis[1]) / s, (axis[0] - x[2]) / s, (x[1] - y[0]) / s, s / 4];
+  } else if (x[0] > y[1] && x[0] > axis[2]) {
+    const s = Math.sqrt(1 + x[0] - y[1] - axis[2]) * 2;
+    rotation = [s / 4, (x[1] + y[0]) / s, (axis[0] + x[2]) / s, (y[2] - axis[1]) / s];
+  } else if (y[1] > axis[2]) {
+    const s = Math.sqrt(1 + y[1] - x[0] - axis[2]) * 2;
+    rotation = [(x[1] + y[0]) / s, s / 4, (axis[1] + y[2]) / s, (axis[0] - x[2]) / s];
+  } else {
+    const s = Math.sqrt(1 + axis[2] - x[0] - y[1]) * 2;
+    rotation = [(axis[0] + x[2]) / s, (axis[1] + y[2]) / s, s / 4, (x[1] - y[0]) / s];
+  }
+  return {
+    origin: joint.origin.position,
+    axis,
+    orientation: normalizeQuaternion(rotation) ?? [0, 0, 0, 1],
+    source: joint.source === 'manual' ? 'manual' : joint.source === 'imported' ? 'imported' : 'geometry',
+    evidence: { evidenceLevel: 'low', messages: ['Migrated from the legacy origin/axis representation.'] },
+    status: joint.status === 'validated' ? 'accepted' : joint.status === 'rejected' ? 'rejected' : joint.status === 'manual' ? 'manual' : 'candidate',
+    axisSignConvention: 'canonical',
+  };
+};
+
+const normalizedJointFrame = (joint: KinematicJoint) => {
+  const frame = joint.jointFrame ?? jointFrameFromLegacy(joint);
+  if (!frame) return undefined;
+  const axis = normalizeAxis(frame.axis);
+  const orientation = normalizeQuaternion(frame.orientation);
+  if (!axis || !orientation || !finiteVector(frame.origin, 3)) return undefined;
+  return { ...frame, axis, orientation };
 };
 
 const clamp = (value: number, lower?: number, upper?: number) => {
@@ -174,39 +217,6 @@ const vectorDot = (a: Vector3Tuple, b: Vector3Tuple) => a[0] * b[0] + a[1] * b[1
 
 const vectorScale = (value: Vector3Tuple, scalar: number): Vector3Tuple => [value[0] * scalar, value[1] * scalar, value[2] * scalar];
 
-const planeNormal = (plane: JointMotionPlane): Vector3Tuple => {
-  if (plane === 'xy') return [0, 0, 1];
-  if (plane === 'xz') return [0, 1, 0];
-  return [1, 0, 0];
-};
-
-const planeFromAxis = (axis: Vector3Tuple): JointMotionPlane => {
-  const absolute = axis.map(Math.abs);
-  if (absolute[0] >= absolute[1] && absolute[0] >= absolute[2]) return 'yz';
-  if (absolute[1] >= absolute[0] && absolute[1] >= absolute[2]) return 'xz';
-  return 'xy';
-};
-
-const planeFromNormal = (normal: Vector3Tuple): JointMotionPlane | undefined => {
-  const normalized = normalizeAxis(normal);
-  if (!normalized) return undefined;
-  const absolute = normalized.map(Math.abs);
-  if (absolute[0] >= absolute[1] && absolute[0] >= absolute[2]) return 'yz';
-  if (absolute[1] >= absolute[0] && absolute[1] >= absolute[2]) return 'xz';
-  return 'xy';
-};
-
-const projectToPlane = (value: Vector3Tuple, plane: JointMotionPlane): Vector3Tuple => {
-  const normal = planeNormal(plane);
-  return vectorSubtract(value, vectorScale(normal, vectorDot(value, normal)));
-};
-
-const constrainedAxis = (axis: Vector3Tuple, plane: JointMotionPlane | undefined) => {
-  const normalized = normalizeAxis(axis);
-  if (!normalized) return undefined;
-  if (!plane) return normalized;
-  return normalizeAxis(projectToPlane(normalized, plane)) ?? normalized;
-};
 
 const matrixPosition = (matrix: number[]): Vector3Tuple => [matrix[3], matrix[7], matrix[11]];
 
@@ -239,40 +249,19 @@ const matrixQuaternion = (matrix: number[]): QuaternionTuple => {
 };
 
 const jointMotionMatrix = (joint: KinematicJoint, value: number) => {
-  const baseAxis = normalizeAxis(joint.axis);
-  const motionPlane = joint.motionPlane;
-  const axis = baseAxis ? constrainedAxis(baseAxis, joint.type === 'prismatic' ? motionPlane : undefined) : undefined;
-  if (!axis || joint.type === 'fixed') return identityMatrix();
+  const frame = normalizedJointFrame(joint);
+  if (!frame || joint.type === 'fixed') return identityMatrix();
   const limited = joint.type === 'continuous' ? value : clamp(value, joint.limits?.lower, joint.limits?.upper);
+  const originFrame = matrixMultiply(translationMatrix(frame.origin), quaternionMatrix(frame.orientation));
+  const inverseOriginFrame = matrixMultiply(quaternionMatrix([-frame.orientation[0], -frame.orientation[1], -frame.orientation[2], frame.orientation[3]]), inverseTranslationMatrix(frame.origin));
   if (joint.type === 'prismatic') {
-    if (joint.motionProfile === 'fixed-origin-lift') {
-      const drivenPoint = joint.drivenPoint ?? [joint.origin.position[0] + 1, joint.origin.position[1], joint.origin.position[2]];
-      const rawLever = vectorSubtract(drivenPoint, joint.origin.position);
-      const plane = joint.motionPlane ?? planeFromNormal(vectorCross(rawLever, axis)) ?? planeFromAxis(axis);
-      const lever = projectToPlane(rawLever, plane);
-      const desiredAxis = constrainedAxis(axis, plane) ?? axis;
-      const normal = planeNormal(plane);
-      const tangentForNormal = vectorCross(normal, lever);
-      const rotationAxis = vectorDot(tangentForNormal, desiredAxis) < 0 ? vectorScale(normal, -1) : normal;
-      if (!rotationAxis) return translationMatrix([axis[0] * limited, axis[1] * limited, axis[2] * limited]);
-      const tangent = vectorCross(rotationAxis, lever);
-      const travelPerRadian = vectorDot(tangent, desiredAxis);
-      if (Math.abs(travelPerRadian) <= EPSILON) return translationMatrix([axis[0] * limited, axis[1] * limited, axis[2] * limited]);
-      const angle = limited / travelPerRadian;
-      const originRotation = normalizeQuaternion(joint.origin.rotation) ?? [0, 0, 0, 1];
-      const originFrame = matrixMultiply(translationMatrix(joint.origin.position), quaternionMatrix(originRotation));
-      return matrixMultiply(
-        matrixMultiply(matrixMultiply(originFrame, axisAngleMatrix(rotationAxis, angle)), quaternionMatrix([-originRotation[0], -originRotation[1], -originRotation[2], originRotation[3]])),
-        inverseTranslationMatrix(joint.origin.position),
-      );
-    }
-    return translationMatrix([axis[0] * limited, axis[1] * limited, axis[2] * limited]);
+    return matrixMultiply(matrixMultiply(originFrame, translationMatrix([0, 0, limited])), inverseOriginFrame);
   }
   if (joint.type === 'revolute' || joint.type === 'continuous') {
-    const rotationAxis = axis;
-    const originRotation = normalizeQuaternion(joint.origin.rotation) ?? [0, 0, 0, 1];
-    const originFrame = matrixMultiply(translationMatrix(joint.origin.position), quaternionMatrix(originRotation));
-    return matrixMultiply(matrixMultiply(matrixMultiply(originFrame, axisAngleMatrix(rotationAxis, limited)), quaternionMatrix([-originRotation[0], -originRotation[1], -originRotation[2], originRotation[3]])), inverseTranslationMatrix(joint.origin.position));
+    return matrixMultiply(matrixMultiply(originFrame, axisAngleMatrix([0, 0, 1], limited)), inverseOriginFrame);
+  }
+  if (joint.type === 'screw' && Number.isFinite(joint.screwPitch)) {
+    return matrixMultiply(matrixMultiply(originFrame, matrixMultiply(axisAngleMatrix([0, 0, 1], limited), translationMatrix([0, 0, joint.screwPitch! * limited]))), inverseOriginFrame);
   }
   return identityMatrix();
 };
@@ -312,11 +301,12 @@ export const normalizeKinematicGraph = (graph: KinematicGraph): KinematicGraph =
   ...graph,
   joints: graph.joints.map((joint) => ({
     ...joint,
-    axis: normalizeAxis(joint.axis) ?? joint.axis,
+    axis: normalizeAxis(joint.jointFrame?.axis ?? joint.axis) ?? joint.axis,
     origin: {
       position: joint.origin.position,
       rotation: normalizeQuaternion(joint.origin.rotation) ?? joint.origin.rotation,
     },
+    jointFrame: normalizedJointFrame(joint),
   })),
 });
 
@@ -480,13 +470,20 @@ export const updateJoint = (graph: KinematicGraph, jointId: string, patch: Parti
     ...graph,
     joints: graph.joints.map((joint) =>
       joint.id === jointId
-        ? {
-            ...joint,
-            ...patch,
-            origin: patch.origin ? { ...joint.origin, ...patch.origin } : joint.origin,
-            limits: patch.limits ? { ...joint.limits, ...patch.limits } : joint.limits,
-            source: patch.source ?? 'manual',
-          }
+        ? (() => {
+            const next = {
+              ...joint,
+              ...patch,
+              origin: patch.origin ? { ...joint.origin, ...patch.origin } : joint.origin,
+              limits: patch.limits ? { ...joint.limits, ...patch.limits } : joint.limits,
+              source: patch.source ?? 'manual',
+            };
+            const changedFrameCoordinates = patch.axis !== undefined || patch.origin !== undefined;
+            return {
+              ...next,
+              jointFrame: patch.jointFrame ?? (changedFrameCoordinates ? jointFrameFromLegacy({ ...next, jointFrame: undefined }) : joint.jointFrame),
+            };
+          })()
         : joint,
     ),
   });

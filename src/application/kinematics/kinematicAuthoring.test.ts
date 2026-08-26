@@ -154,11 +154,13 @@ export const runKinematicAuthoringTests = () => {
   ok(Math.abs(fixedEndLiftPose[0] - 1) < 0.04 && fixedEndLiftPose[1] > 0.24, 'K09 fixed-end lift did not keep the pivot side stable while lifting the driven end.');
   nearly(fixedEndLiftPose[2], 0);
 
-  const planeLockedSlideGraph = graph([part('a'), part('b')], [joint('j1', 'a', 'b', { type: 'prismatic', motionProfile: 'linear-slide', motionPlane: 'xy', axis: [1, 1, 1], limits: { lower: -5, upper: 5 } })]);
-  const planeLockedSlidePose = evaluateForwardKinematics(planeLockedSlideGraph, setJointValue(planeLockedSlideGraph, undefined, 'j1', 1)).b.position;
-  nearly(planeLockedSlidePose[2], 0);
+  const arbitrarySlideGraph = graph([part('a'), part('b')], [joint('j1', 'a', 'b', { type: 'prismatic', motionProfile: 'linear-slide', motionPlane: 'xy', axis: [1, 1, 1], limits: { lower: -5, upper: 5 } })]);
+  const arbitrarySlidePose = evaluateForwardKinematics(arbitrarySlideGraph, setJointValue(arbitrarySlideGraph, undefined, 'j1', 1)).b.position;
+  nearly(arbitrarySlidePose[0], 1 / Math.sqrt(3));
+  nearly(arbitrarySlidePose[1], 1 / Math.sqrt(3));
+  nearly(arbitrarySlidePose[2], 1 / Math.sqrt(3));
 
-  const planeLockedLiftGraph = graph(
+  const legacyLiftGraph = graph(
     [part('a'), part('b', [1, 0, 0])],
     [
       joint('j1', 'a', 'b', {
@@ -172,8 +174,10 @@ export const runKinematicAuthoringTests = () => {
       }),
     ],
   );
-  const planeLockedLiftPose = evaluateForwardKinematics(planeLockedLiftGraph, setJointValue(planeLockedLiftGraph, undefined, 'j1', 0.2)).b.position;
-  nearly(planeLockedLiftPose[2], 0);
+  const legacyLiftPose = evaluateForwardKinematics(legacyLiftGraph, setJointValue(legacyLiftGraph, undefined, 'j1', 0.2)).b.position;
+  nearly(legacyLiftPose[0], 1);
+  nearly(legacyLiftPose[1], 0.2 / Math.sqrt(2));
+  nearly(legacyLiftPose[2], 0.2 / Math.sqrt(2));
 
   const fixedGraph = graph([part('a'), part('b', [1, 0, 0])], [joint('j1', 'a', 'b', { type: 'fixed' })]);
   const fixedPose = evaluateForwardKinematics(fixedGraph, setJointValue(fixedGraph, undefined, 'j1', Math.PI)).b.position;

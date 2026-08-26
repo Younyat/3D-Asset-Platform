@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { TDSLoader } from 'three/examples/jsm/loaders/TDSLoader.js';
 import { createKinematicGraphFromLegacyJoints } from '../application/articulation/analyzeModel';
+import { createProfessionalRobotRigFromStaticObj, extractProfessionalRobotRig } from '../application/kinematics/professionalRobotRig';
 import { ImportedJointPose, ImportedModelGeometry, SceneNode, defaultMaterial, defaultTransform } from '../domain/model';
 
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
@@ -270,11 +271,14 @@ const computeImportNormalization = (scene: THREE.Object3D) => {
 
 export const createImportedModelNode = async (file: File): Promise<SceneNode> => {
   const [dataUrl, parsed] = await Promise.all([fileToDataUrl(file), parseModelFile(file)]);
-  const joints = extractArticulationJoints(parsed.scene);
+  const professionalRig = extractProfessionalRobotRig(parsed.scene) ?? createProfessionalRobotRigFromStaticObj(parsed.scene, file.name);
+  const joints = professionalRig?.joints ?? extractArticulationJoints(parsed.scene);
   const partObjectNames = extractRenderablePartNames(parsed.scene, joints);
   const normalization = computeImportNormalization(parsed.scene);
   const bones = joints.filter((joint) => joint.sourceType === 'bone').map((joint) => joint.name);
-  const kinematicGraph = createKinematicGraphFromLegacyJoints(parsed.scene.clone(true), joints);
+  const kinematicGraph = professionalRig?.kinematicGraph ?? createKinematicGraphFromLegacyJoints(parsed.scene.clone(true), joints);
+  const animationNames = parsed.animations.map((clip: THREE.AnimationClip) => clip.name || 'Animation');
+  const recoveredClipNames = professionalRig?.kinematicGraph.motionClips?.map((clip) => clip.name) ?? [];
   const geometry: ImportedModelGeometry = {
     kind: 'imported-model',
     assetName: file.name,
@@ -282,15 +286,16 @@ export const createImportedModelNode = async (file: File): Promise<SceneNode> =>
     sourceFormat: parsed.sourceFormat,
     ...normalization,
     bones,
-    animations: parsed.animations.map((clip: THREE.AnimationClip) => clip.name || 'Animation'),
+    animations: animationNames.length ? animationNames : recoveredClipNames,
     joints,
     partObjectNames,
     kinematicGraph,
+    kinematicState: professionalRig?.kinematicState,
   };
 
   return {
     id: id('node'),
-    name: file.name.replace(/\.(glb|fbx|dae)$/i, ''),
+    name: file.name.replace(/\.(glb|fbx|dae|obj|3ds)$/i, ''),
     geometry,
     transform: {
       ...defaultTransform(),

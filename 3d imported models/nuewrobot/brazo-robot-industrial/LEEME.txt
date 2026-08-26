@@ -1,0 +1,77 @@
+BRAZO ROBOT INDUSTRIAL - rig animado de 6 ejes - v1.0
+=====================================================
+
+EMPIEZA AQUI
+   1) EJEMPLO-COMPLETO.html   Integracion completa EJECUTABLE en un solo
+      archivo: arrastra el .glb exportado sobre la ventana y el brazo se
+      mueve. Clips del archivo + control por codigo + sliders por eje +
+      panel de diagnostico. ~120 lineas comentadas: es el codigo a copiar.
+   2) GUIA-PROGRAMADOR.html   Como funciona el movimiento, el malentendido
+      de "una animacion por pieza", los 7 nodos que se mueven y una tabla
+      de diagnostico "por que no se mueve".
+
+SI LAS PIEZAS SE MUEVEN POR SEPARADO
+   Se esta animando cada malla con su propia trayectoria. No es asi.
+   El rig se mueve escribiendo UN SOLO angulo en cada nodo articulado:
+   los hijos siguen al padre automaticamente. Nunca se toca una malla.
+     MAL:  forearmMesh.position.set(x, y, z)
+     BIEN: getObjectByName('J3_elbow_pitch').rotation.z = 80 * Math.PI/180
+   Una articulacion rotativa = UN grado de libertad = UN numero.
+   Detalle en GUIA-PROGRAMADOR.html, seccion 2.
+
+CONTENIDO
+  EJEMPLO-COMPLETO.html           Integracion completa ejecutable (1 archivo)
+  GUIA-PROGRAMADOR.html           Guia de integracion + diagnostico de fallos
+  Documentacion-Brazo-Robot.html  Documentacion tecnica del rig
+  rig.json                        Especificacion legible por maquina: jerarquia,
+                                  ejes, limites, velocidades, poses y TODOS los
+                                  keyframes de los 3 clips
+  brazo-robot-industrial.urdf     Cadena cinematica en URDF (ROS / MoveIt /
+                                  Gazebo / PyBullet / Isaac Sim)
+  robot-controller.js             Controlador reutilizable (modulo ES, sin deps):
+                                  setJoint, moveTo con limite de velocidad,
+                                  setGrip, secuencias, playClip, diagnose()
+  robot-arm.js                    Modelo, rig y generacion de los clips
+  robot-arm.html                  Visor interactivo + EXPORTADOR GLB/OBJ
+  three-d-stage.js                Componente del visor
+  doc-page.js                     Componente de maquetacion de los documentos
+
+COMO OBTENER EL OBJETO 3D
+  1. Abrir robot-arm.html en un navegador (necesita internet: three.js via CDN).
+  2. "Download GLB" -> brazo-robot-industrial.glb
+     Contiene geometria, materiales PBR, jerarquia de articulaciones con nombre,
+     los 3 clips de animacion y los metadatos del rig en extras/userData.
+     ES EL ARCHIVO DE INTERCAMBIO CON OTRAS PLATAFORMAS.
+  3. "Download OBJ + MTL" -> version estatica. El OBJ NO soporta jerarquia
+     ni animacion: no sirve para mover el brazo.
+
+LOS 7 NODOS QUE SE MUEVEN (nombres exactos)
+  J1_base_yaw          rotativa  rotation.y   -170 .. +170 deg   180 deg/s
+  J2_shoulder_pitch    rotativa  rotation.z    -60 ..  +95 deg   140 deg/s
+  J3_elbow_pitch       rotativa  rotation.z    -20 .. +150 deg   160 deg/s
+  J4_wrist_pitch       rotativa  rotation.z   -110 .. +110 deg   250 deg/s
+  J5_tool_roll         rotativa  rotation.y   -180 .. +180 deg   320 deg/s
+  J6_gripper_finger_L  lineal    position.x  -0.085 .. -0.032 m  0.12 m/s
+  J6_gripper_finger_R  lineal    position.x  +0.032 .. +0.085 m  0.12 m/s
+  (los dedos van SIEMPRE en espejo; la pinza es el ultimo eslabon)
+
+CLIPS INCLUIDOS EN EL GLB
+  Ciclo_Pick_And_Place  10.0 s  bucle   ciclo completo, agarre en t=3.3 s,
+                                        suelta en t=7.6 s
+  Ir_A_Home              2.0 s  1 vez
+  Demo_Ejes             16.2 s  bucle   cada eje barre su rango: sirve para
+                                        verificar que la importacion es correcta
+
+CAUSA #1 DE QUE NO SE MUEVA
+  Falta la llamada por frame: mixer.update(delta) / robot.update(delta).
+CAUSA #2
+  Se rota el nodo raiz o una malla en vez de los nodos J*.
+CAUSA #3
+  Se importo el OBJ en vez del GLB.
+CAUSA #4
+  Se anima cada malla por separado en vez de los nodos articulados.
+  Tabla completa de diagnostico en GUIA-PROGRAMADOR.html, seccion 3.
+
+Unidades: metros. Y arriba, mano derecha (glTF). Origen en el centro de la base,
+apoyada en y = 0. Altura en Home ~1.45 m. Alcance horizontal ~1.15 m.
+Unity: escala de importacion 1. Unreal: escala 100 (centimetros).

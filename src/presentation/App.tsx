@@ -67,7 +67,7 @@ import {
   ValidationIssue,
   Vector3Tuple,
 } from '../domain/model';
-import type { KinematicGraph } from '../domain/kinematics';
+import type { KinematicGraph, KinematicMotionClip } from '../domain/kinematics';
 import type { KinematicJoint, MechanicalPart } from '../domain/kinematics';
 import type { FunctionalComponent, FunctionalComponentMotionDefinition } from '../domain/mechanics';
 import {
@@ -82,6 +82,14 @@ import {
   updateJoint,
   validateKinematicGraph,
 } from '../application/kinematics/kinematicAuthoring';
+import {
+  buildRobotPickAndPlaceSequence,
+  createRobotServoState,
+  startRobotClip,
+  startRobotSequence,
+  updateRobotServo,
+} from '../application/kinematics/robotMotionController';
+import type { RobotServoState } from '../application/kinematics/robotMotionController';
 import {
   isDesktopRuntime,
   openProjectNative,
@@ -117,11 +125,13 @@ import {
   KinematicPointPickEvent,
   PieceReferenceCenterEstimateEvent,
   MotionTrainingPreview,
+  RobotCursorGuideEvent,
   ThreeViewport,
   ViewportContextMenuEvent,
   ViewportStats,
 } from './components/ThreeViewport';
 import { buildFunctionalAssembly, buildFunctionalComponent } from '../application/mechanics/functionalModel';
+import { solveRobotArmCursorTarget } from '../application/kinematics/robotCursorGuidance';
 
 const makeStarterProject = () => {
   const project = createEmptyProject('Prototype Asset');
@@ -380,15 +390,12 @@ const createStandalonePieceGraph = (componentId: string, name: string, objectNam
         parentPartId: rootPartId,
         childPartId: movingPartId,
         type: 'fixed',
-        origin: { position: center, rotation: [0, 0, 0, 1] },
+        origin: { position: [0, 0, 0], rotation: [0, 0, 0, 1] },
         axis: [0, 0, 1],
-        motionProfile: 'rotation-around-origin',
-        motionPlane: 'xy',
         limits: { lower: -0.8, upper: 0.8 },
         source: 'manual',
-        confidence: 1,
-        evidence: [{ type: 'manual', score: 1, message: 'Clean isolated piece motion definition.' }],
-        status: 'manual',
+        evidence: [{ type: 'manual', message: 'No mechanical interface has been accepted for this isolated piece yet.' }],
+        status: 'candidate',
       },
     ],
   };
@@ -396,7 +403,7 @@ const createStandalonePieceGraph = (componentId: string, name: string, objectNam
 
 const motionDefinitionFromJoint = (joint: KinematicJoint, now = new Date().toISOString()): FunctionalComponentMotionDefinition => {
   const dynamic = joint.type !== 'fixed';
-  const twoEnd = joint.motionProfile === 'fixed-origin-lift';
+  const twoEnd = false;
   const fixedEndpoint = {
     id: 'fixed_end',
     name: 'Fixed end',
@@ -648,10 +655,7 @@ const axisPatchForJoint = (joint: KinematicJoint | undefined, axis: [number, num
 
 const centeredAxisPatchForPiece = (node: SceneNode | undefined, joint: KinematicJoint | undefined, axis: [number, number, number]): Partial<KinematicJoint> => ({
   ...axisPatchForJoint(joint, axis),
-  origin: {
-    position: node && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : (joint?.origin.position ?? [0, 0, 0]),
-    rotation: [0, 0, 0, 1],
-  },
+  origin: joint?.origin,
 });
 
 type ViewportInspectionState = {
@@ -702,6 +706,7 @@ export const App = () => {
   const [motionTrainer, setMotionTrainer] = useState<MotionTrainerState | undefined>();
   const [pieceAnalysis, setPieceAnalysis] = useState<PieceAnalysisState | undefined>();
   const [kinematicEditTarget, setKinematicEditTarget] = useState<KinematicEditTarget | undefined>();
+  const [robotCursorGuideNodeId, setRobotCursorGuideNodeId] = useState<string | undefined>();
   const [viewportNotice, setViewportNotice] = useState<string | undefined>();
   const [viewportInspection, setViewportInspection] = useState<ViewportInspectionState>({
     phase: 'idle',
@@ -2344,8 +2349,6 @@ export const App = () => {
   };
 
   const setPieceStaticMode = (nodeId: string, jointId: string, isStatic: boolean) => {
-    const node = document.nodes.find((item) => item.id === nodeId);
-    const center = node && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : ([0, 0, 0] as Vector3Tuple);
     updateKinematicGraphForNode(
       nodeId,
       (graph) =>
@@ -2353,7 +2356,6 @@ export const App = () => {
           type: isStatic ? 'fixed' : 'revolute',
           motionProfile: isStatic ? undefined : 'rotation-around-origin',
           motionPlane: isStatic ? undefined : 'xy',
-          origin: { position: center, rotation: [0, 0, 0, 1] },
           limits: isStatic ? undefined : { lower: -0.8, upper: 0.8 },
         }),
       isStatic ? 'Piece marked static' : 'Piece marked dynamic',
@@ -2365,17 +2367,9 @@ export const App = () => {
     const node = document.nodes.find((item) => item.id === nodeId);
     const joint = node ? graphFromGeometry(node.geometry)?.joints.find((item) => item.id === jointId) : undefined;
     if (!joint) return;
-    const center = node && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : joint.origin.position;
     if (endpointMode === 'two-end') {
-      updateKinematicJointForNode(nodeId, jointId, {
-        type: 'prismatic',
-        motionProfile: 'fixed-origin-lift',
-        motionPlane: joint.motionPlane ?? 'xy',
-        origin: { position: center, rotation: [0, 0, 0, 1] },
-        drivenPoint: joint.drivenPoint ?? [center[0] + 1, center[1], center[2]],
-        limits: joint.limits ?? { lower: -0.5, upper: 0.5 },
-      });
-      startKinematicEditForNode(nodeId, jointId, 'pick-origin');
+      setStatus('Two-end pieces require two independent joints');
+      showViewportNotice('M2 does not create hybrid motions. Define one joint frame for each mechanical interface.', 6200);
       return;
     }
 
@@ -2383,7 +2377,6 @@ export const App = () => {
       type: 'revolute',
       motionProfile: 'rotation-around-origin',
       motionPlane: joint.motionPlane ?? rotationPlaneForAxis(joint.axis),
-      origin: { position: center, rotation: [0, 0, 0, 1] },
       drivenPoint: undefined,
       limits: joint.limits ?? { lower: -0.8, upper: 0.8 },
     });
@@ -2843,6 +2836,84 @@ export const App = () => {
     setStatus('Joint test updated');
   };
 
+  const setKinematicJointValuesForNode = useCallback((nodeId: string, values: Record<string, number>) => {
+    setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
+    setDocument((current) =>
+      touch({
+        ...current,
+        selectedNodeId: nodeId,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId || !kinematicGeometryWithGraph(node.geometry)) return node;
+          const graph = graphFromGeometry(node.geometry);
+          if (!graph) return node;
+          const baseState = node.geometry.kinematicState ?? createHomeKinematicState(graph);
+          return {
+            ...node,
+            geometry: {
+              ...node.geometry,
+              kinematicGraph: graph,
+              kinematicState: {
+                homeJointValues: { ...baseState.homeJointValues },
+                jointValues: { ...baseState.jointValues, ...values },
+              },
+            },
+          };
+        }),
+      }),
+    );
+  }, []);
+
+  const toggleRobotCursorGuideForNode = (nodeId: string) => {
+    setRobotCursorGuideNodeId((current) => {
+      const next = current === nodeId ? undefined : nodeId;
+      if (next) {
+        setTool('select');
+        setDemoMotionNodeId((demoNodeId) => (demoNodeId === nodeId ? undefined : demoNodeId));
+        setKinematicEditTarget(undefined);
+        setStatus('Cursor robot guidance active');
+        showViewportNotice('Modo guia cursor activo: agarra el brazo en el escenario y arrastra para mover toda la cadena.', 5200);
+      } else {
+        setStatus('Cursor robot guidance stopped');
+        showViewportNotice('Modo guia cursor desactivado.', 2600);
+      }
+      return next;
+    });
+  };
+
+  const handleRobotCursorGuide = useCallback((event: RobotCursorGuideEvent) => {
+    let nextStatus = event.dragging ? 'Guiding robot arm with cursor' : 'Cursor robot guidance ready';
+    setDemoMotionNodeId((current) => (current === event.nodeId ? undefined : current));
+    setDocument((current) => {
+      let solved = false;
+      const nodes = current.nodes.map((node) => {
+        if (node.id !== event.nodeId || !kinematicGeometryWithGraph(node.geometry)) return node;
+        const graph = graphFromGeometry(node.geometry);
+        if (!graph) return node;
+        const baseState = node.geometry.kinematicState ?? createHomeKinematicState(graph);
+        const result = solveRobotArmCursorTarget(graph, baseState, event.point, { preserveToolPitch: true });
+        if (!result.compatible) {
+          nextStatus = 'This model needs J1-J4 robot joints for cursor guidance';
+          return node;
+        }
+        solved = true;
+        nextStatus = result.reachable ? 'Guiding robot arm with cursor' : 'Cursor target clamped to reachable envelope';
+        return {
+          ...node,
+          geometry: {
+            ...node.geometry,
+            kinematicGraph: graph,
+            kinematicState: {
+              homeJointValues: { ...baseState.homeJointValues },
+              jointValues: result.jointValues,
+            },
+          },
+        };
+      });
+      return solved ? touch({ ...current, selectedNodeId: event.nodeId, nodes }) : current;
+    });
+    setStatus(nextStatus);
+  }, []);
+
   const resetKinematicPoseForNode = (nodeId: string) => {
     setDemoMotionNodeId((current) => (current === nodeId ? undefined : current));
     setDocument((current) =>
@@ -2894,20 +2965,16 @@ export const App = () => {
               ...part,
               bounds: { ...part.bounds, center: referenceCenter.position },
               metadata: { ...part.metadata, pieceReferenceCenter: referenceCenter.position },
-            })),
-            joints: graph.joints.map((joint) => ({
-              ...joint,
-              origin: { position: referenceCenter.position, rotation: joint.origin.rotation },
-              evidence: [...joint.evidence, { type: 'geometry', score: referenceCenter.confidence, message: `Piece reference estimated from ${referenceCenter.triangleCount} mesh triangles using ${referenceCenter.method}.` }],
+              geometricProperties: event.geometricProperties ?? part.geometricProperties,
+              massProperties: event.massProperties ?? part.massProperties,
             })),
           };
           const functionalComponent = node.geometry.functionalComponent
             ? syncComponentMotionFromGraph(
                 {
                   ...node.geometry.functionalComponent,
-                  origin: { ...node.geometry.functionalComponent.origin, position: referenceCenter.position },
                   bounds: { ...node.geometry.functionalComponent.bounds, center: referenceCenter.position },
-                  metadata: { ...node.geometry.functionalComponent.metadata, pieceReferenceCenter: referenceCenter },
+                  metadata: { ...node.geometry.functionalComponent.metadata, geometricProperties: event.geometricProperties, massProperties: event.massProperties, pieceReferenceCenter: referenceCenter },
                 },
                 centeredGraph,
               )
@@ -2928,7 +2995,7 @@ export const App = () => {
       return nextDocument;
     });
     setStatus(`Piece reference estimated from ${event.triangleCount} triangles`);
-    showViewportNotice(`Reference center calculated: ${event.method.replace('-', ' ')}. It is now the default pivot for this piece.`, 6200);
+    showViewportNotice(`Geometric reference calculated: ${event.method.replace('-', ' ')}. It is not used as a joint pivot.`, 6200);
   };
 
   const persistManualPieceReferenceCenter = (nodeId: string, position: Vector3Tuple) => {
@@ -3016,42 +3083,36 @@ export const App = () => {
       const node = document.nodes.find((item) => item.id === event.nodeId);
       const graph = node ? graphFromGeometry(node.geometry) : undefined;
       const joint = graph?.joints.find((item) => item.id === event.jointId);
-      const needsDrivenPoint = joint?.motionProfile === 'fixed-origin-lift';
+      const candidate = event.candidate;
+      if (!candidate) {
+        setStatus('No reliable mechanical feature detected at this click');
+        showViewportNotice('No reliable cylinder or circular interface was detected. The clicked point was not used as a pivot.', 6200);
+        return;
+      }
       updateKinematicGraphForNode(
         event.nodeId,
         (graph) =>
           updateJoint(graph, event.jointId, {
-            origin: { position: event.point, rotation: [0, 0, 0, 1] },
+            origin: { position: candidate.frame.origin, rotation: candidate.frame.orientation },
+            axis: candidate.frame.axis,
+            jointFrame: candidate.frame,
+            inferredCandidate: candidate,
+            type: candidate.motionType === 'unknown' ? graph.joints.find((item) => item.id === event.jointId)?.type ?? 'fixed' : candidate.motionType,
+            source: 'geometry',
             evidence: [
               ...(graph.joints.find((joint) => joint.id === event.jointId)?.evidence ?? []),
-              { type: 'manual', score: 1, message: `Joint origin picked on ${event.objectName ?? 'model surface'}.` },
+              { type: 'geometry', message: `Mechanical frame fitted from geometry seeded on ${event.objectName ?? 'model surface'}; the click itself was not used as the pivot.` },
             ],
           }),
-        'Joint origin picked',
+        'Mechanical joint frame fitted',
       );
       if (pieceAnalysis?.nodeId === event.nodeId) {
-        persistManualPieceReferenceCenter(event.nodeId, event.point);
-        showViewportNotice('Manual piece reference center saved. New movements will use this pivot.', 5200);
-      }
-      if (needsDrivenPoint) {
-        setKinematicEditTarget({
-          nodeId: event.nodeId,
-          jointId: event.jointId,
-          mode: 'pick-driven-point',
-          origin: event.point,
-          axis: joint.axis,
-          drivenPoint: joint.drivenPoint,
-          focusKey: `pick-driven-${event.jointId}-${Date.now()}`,
-        });
-        setStatus('Pick moving point');
-        showViewportNotice('Fixed point saved. Now click the moving end of the piece.', 0);
-      } else if (pieceAnalysis?.nodeId === event.nodeId) {
         setKinematicEditTarget({
           nodeId: event.nodeId,
           jointId: event.jointId,
           mode: 'show-joint',
-          origin: event.point,
-          axis: joint?.axis ?? [0, 0, 1],
+          origin: candidate.frame.origin,
+          axis: candidate.frame.axis,
           focusKey: `piece-reference-${event.jointId}-${Date.now()}`,
         });
         kinematicEditSnapshotRef.current = undefined;
@@ -3063,24 +3124,9 @@ export const App = () => {
     }
 
     if (event.mode === 'pick-driven-point') {
-      updateKinematicGraphForNode(
-        event.nodeId,
-        (graph) =>
-          updateJoint(graph, event.jointId, {
-            drivenPoint: event.point,
-            motionProfile: 'fixed-origin-lift',
-            type: 'prismatic',
-            evidence: [
-              ...(graph.joints.find((joint) => joint.id === event.jointId)?.evidence ?? []),
-              { type: 'manual', score: 1, message: `Moving end picked on ${event.objectName ?? 'model surface'}.` },
-            ],
-          }),
-        'Moving point picked',
-        true,
-      );
       setKinematicEditTarget(undefined);
       kinematicEditSnapshotRef.current = undefined;
-      showViewportNotice('Fixed-point movement defined. Choose the yellow axis direction, then press Test Movement.', 6200);
+      showViewportNotice('A two-end motion is represented by two joints in M2. No hybrid prismatic rotation was created.', 6200);
       return;
     }
 
@@ -3787,6 +3833,7 @@ export const App = () => {
           viewportNotice={viewportNotice}
           kinematicEditTarget={activeKinematicEditTarget}
           motionDemoNodeId={demoMotionNodeId}
+          robotCursorGuideNodeId={robotCursorGuideNodeId}
           motionTrainingPreview={motionTrainingPreview}
           onSelect={selectNode}
           onTransformCommit={updateNodeTransform}
@@ -3794,6 +3841,7 @@ export const App = () => {
           onJointPoseChange={setImportedJointMotionForNode}
           onKinematicPointPick={handleKinematicPointPick}
           onKinematicAxisChange={handleKinematicAxisChange}
+          onRobotCursorGuide={handleRobotCursorGuide}
           onPieceReferenceCenterEstimate={applyPieceReferenceCenterEstimate}
           onPartSelectionChange={updatePartSelectionStatus}
           onNodeContextMenu={(event) => {
@@ -3982,15 +4030,12 @@ export const App = () => {
                     <button
                       title="Define pure rotation around the clicked pivot. The piece does not translate; it rotates around X, Y or Z."
                       onClick={() => {
-                        const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
-                        const center = node && pieceAnalysis?.nodeId === viewportInspection.nodeId && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : undefined;
                         updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
                           type: 'revolute',
                           motionProfile: 'rotation-around-origin',
                           motionPlane: viewportActiveJoint?.motionPlane ?? rotationPlaneForAxis(viewportActiveJoint?.axis ?? [0, 0, 1]),
-                          origin: center ? { position: center, rotation: [0, 0, 0, 1] } : viewportActiveJoint?.origin,
                         });
-                        startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, center ? 'show-joint' : 'pick-origin');
+                        startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'show-joint');
                       }}
                     >
                       Rotatorio
@@ -3998,39 +4043,15 @@ export const App = () => {
                     <button
                       title="Move both ends of the piece together along the selected axis. No rotation and no fixed/mobile point pair."
                       onClick={() => {
-                        const node = document.nodes.find((item) => item.id === viewportInspection.nodeId);
-                        const center = node && pieceAnalysis?.nodeId === viewportInspection.nodeId && kinematicGeometryWithGraph(node.geometry) ? pieceReferenceCenter(node.geometry) : undefined;
                         updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
                           type: 'prismatic',
                           motionProfile: 'linear-slide',
                           motionPlane: viewportActiveJoint?.motionPlane ?? defaultPlaneForLinearAxis(viewportActiveJoint?.axis ?? [0, 1, 0]),
-                          origin: center ? { position: center, rotation: [0, 0, 0, 1] } : viewportActiveJoint?.origin,
                         });
                         startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'show-joint');
                       }}
                     >
                       Traslacion lineal
-                    </button>
-                    <button
-                      title="Pick a fixed point and then a moving point. The moving point circles around the fixed point."
-                      onClick={() =>
-                        viewportActiveJoint &&
-                        (() => {
-                          updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, {
-                            type: 'prismatic',
-                            motionProfile: 'fixed-origin-lift',
-                            motionPlane: viewportActiveJoint.motionPlane ?? 'xy',
-                            drivenPoint: viewportActiveJoint.drivenPoint ?? [
-                              viewportActiveJoint.origin.position[0] + 1,
-                              viewportActiveJoint.origin.position[1],
-                              viewportActiveJoint.origin.position[2],
-                            ],
-                          });
-                          startKinematicEditForNode(viewportInspection.nodeId!, viewportInspection.jointId!, 'pick-origin');
-                        })()
-                      }
-                    >
-                      Punto fijo
                     </button>
                     <button title="Change movement type to continuous rotation around the red pivot." onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { type: 'continuous', motionProfile: 'rotation-around-origin' })}>Continuous rotation</button>
                     <button title="Mark this as a fixed joint with no relative movement." onClick={() => updateKinematicJointForNode(viewportInspection.nodeId!, viewportInspection.jointId!, { type: 'fixed' })}>Fixed</button>
@@ -4244,6 +4265,7 @@ export const App = () => {
                 removeValidatedMotion={removeValidatedMotion}
                 selectedPartNames={selectedPartsForSelectedNode.map((part) => part.objectName)}
                 setKinematicJointValue={setKinematicJointValueForNode}
+                setKinematicJointValues={setKinematicJointValuesForNode}
                 resetKinematicPose={resetKinematicPoseForNode}
                 updateKinematicJoint={updateKinematicJointForNode}
                 startKinematicEdit={startKinematicEditForNode}
@@ -4252,6 +4274,8 @@ export const App = () => {
                 deleteKinematicJoint={deleteKinematicJointForNode}
                 createKinematicJoint={createKinematicJointForNode}
                 saveKinematicConfiguration={save}
+                robotCursorGuideActive={robotCursorGuideNodeId === selectedNode.id}
+                toggleRobotCursorGuide={toggleRobotCursorGuideForNode}
                 randomizeGenerator={randomizeGenerator}
               />
             </>
@@ -4688,6 +4712,7 @@ type KinematicGraphPanelProps = {
   node: SceneNode;
   selectedPartNames: string[];
   setKinematicJointValue: (nodeId: string, jointId: string, value: number) => void;
+  setKinematicJointValues: (nodeId: string, values: Record<string, number>) => void;
   resetKinematicPose: (nodeId: string) => void;
   updateKinematicJoint: (nodeId: string, jointId: string, patch: Partial<KinematicJoint>) => void;
   startKinematicEdit: (nodeId: string, jointId: string, mode: KinematicEditTarget['mode']) => void;
@@ -4696,6 +4721,8 @@ type KinematicGraphPanelProps = {
   deleteKinematicJoint: (nodeId: string, jointId: string) => void;
   createKinematicJoint: (nodeId: string, selectedPartNames: string[]) => void;
   saveKinematicConfiguration: () => void | Promise<void>;
+  robotCursorGuideActive: boolean;
+  toggleRobotCursorGuide: (nodeId: string) => void;
 };
 
 type MechanicalInspectionPhase = 'idle' | 'running' | 'stopped' | 'done';
@@ -4748,6 +4775,7 @@ const KinematicGraphPanel = ({
   node,
   selectedPartNames,
   setKinematicJointValue,
+  setKinematicJointValues,
   resetKinematicPose,
   updateKinematicJoint,
   startKinematicEdit,
@@ -4756,6 +4784,8 @@ const KinematicGraphPanel = ({
   deleteKinematicJoint,
   createKinematicJoint,
   saveKinematicConfiguration,
+  robotCursorGuideActive,
+  toggleRobotCursorGuide,
 }: KinematicGraphPanelProps) => {
   const geometry = node.geometry as ImportedModelGeometry;
   const graph = graphFromImportedGeometry(geometry);
@@ -4779,8 +4809,13 @@ const KinematicGraphPanel = ({
   const [repairJointId, setRepairJointId] = useState<string | undefined>();
   const [inspectionMessage, setInspectionMessage] = useState('Import a model, analyze mechanics, then test and validate each real movement.');
   const [autoTest, setAutoTest] = useState<MechanicalInspectionState>({ phase: 'idle', index: 0, step: 'forward', results: {} });
+  const [clipPlayback, setClipPlayback] = useState<{ clipId: string; startedAt: number } | undefined>();
+  const [robotPlayback, setRobotPlayback] = useState<{ controller: RobotServoState; lastAt: number } | undefined>();
   const selectedJoint = graph.joints.find((joint) => joint.id === selectedJointId) ?? graph.joints[0];
   const needsReviewCount = graph.joints.filter((joint) => humanJointState(joint, issueByJoint.get(joint.id) ?? []) === 'Needs attention').length;
+  const fullArmClip = graph.motionClips?.find((clip) => /pick|place|ciclo/i.test(clip.name)) ?? graph.motionClips?.[0];
+  const jointByJointClip = graph.motionClips?.find((clip) => /demo|ejes|axis/i.test(clip.name));
+  const activeClip = clipPlayback ? graph.motionClips?.find((clip) => clip.id === clipPlayback.clipId) : undefined;
 
   useEffect(() => {
     if (!selectedJointId || !graph.joints.some((joint) => joint.id === selectedJointId)) {
@@ -4837,6 +4872,24 @@ const KinematicGraphPanel = ({
     return () => window.clearTimeout(timer);
   }, [autoTest, graph.joints, node.id, resetKinematicPose, setKinematicJointValue, startKinematicEdit]);
 
+  useEffect(() => {
+    if (!robotPlayback) return undefined;
+    const timer = window.setInterval(() => {
+      setRobotPlayback((current) => {
+        if (!current) return undefined;
+        const now = performance.now();
+        const result = updateRobotServo(graph, current.controller, (now - current.lastAt) / 1000, state);
+        setKinematicJointValues(node.id, result.kinematicState.jointValues);
+        if (!result.state.activeClip && (!result.state.sequence || result.state.sequence.completed)) {
+          setInspectionMessage(result.activeLabel ? `${result.activeLabel} finished.` : 'Robot motion finished.');
+          return undefined;
+        }
+        return { controller: result.state, lastAt: now };
+      });
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [robotPlayback, graph, node.id, setKinematicJointValues, state]);
+
   const updateAxis = (joint: KinematicJoint, axis: [number, number, number]) => {
     updateKinematicJoint(node.id, joint.id, { axis });
   };
@@ -4861,6 +4914,32 @@ const KinematicGraphPanel = ({
     resetKinematicPose(node.id);
     setAutoTest((current) => ({ ...current, phase: 'stopped', step: 'home' }));
     setInspectionMessage('Inspection stopped and model returned to Home.');
+  };
+
+  const playMotionClip = (clip: KinematicMotionClip | undefined) => {
+    if (!clip) {
+      setInspectionMessage('This model does not include a professional motion clip.');
+      return;
+    }
+    setAutoTest((current) => (current.phase === 'running' ? { ...current, phase: 'stopped', step: 'home' } : current));
+    const controller = startRobotClip(createRobotServoState(graph, state), clip);
+    setClipPlayback({ clipId: clip.id, startedAt: performance.now() });
+    setRobotPlayback({ controller, lastAt: performance.now() });
+    setInspectionMessage(`Playing ${clip.name}: ${clip.description ?? 'professional robot motion'}.`);
+  };
+
+  const stopMotionClip = () => {
+    setClipPlayback(undefined);
+    setRobotPlayback(undefined);
+    setInspectionMessage(activeClip ? `${activeClip.name} stopped.` : 'Robot animation stopped.');
+  };
+
+  const playProgrammaticPickAndPlace = () => {
+    const controller = startRobotSequence(createRobotServoState(graph, state), 'Pick and place programatico', buildRobotPickAndPlaceSequence());
+    setAutoTest((current) => (current.phase === 'running' ? { ...current, phase: 'stopped', step: 'home' } : current));
+    setClipPlayback(undefined);
+    setRobotPlayback({ controller, lastAt: performance.now() });
+    setInspectionMessage('Playing programmatic pick-and-place: servo targets, speed limits, grip waits and Home return.');
   };
 
   const validateGraph = () => {
@@ -4957,9 +5036,34 @@ const KinematicGraphPanel = ({
           <Play size={14} />
           <span>Test All Joints</span>
         </button>
+        <button title="Animate the full robot with the imported professional pick-and-place sequence." disabled={!fullArmClip || Boolean(robotPlayback)} onClick={() => playMotionClip(fullArmClip)}>
+          <Activity size={14} />
+          <span>Auto brazo completo</span>
+        </button>
+        <button
+          className={robotCursorGuideActive ? 'active' : ''}
+          title="Grab the robot arm in the viewport and drag the cursor. The controller solves the base, shoulder, elbow and wrist as one chain."
+          disabled={Boolean(robotPlayback) || graph.joints.length < 4}
+          onClick={() => toggleRobotCursorGuide(node.id)}
+        >
+          <Move3D size={14} />
+          <span>{robotCursorGuideActive ? 'Soltar cursor' : 'Guiar con cursor'}</span>
+        </button>
+        <button title="Run the controller-style pick-and-place sequence with velocity limits, waits and gripper timing." disabled={Boolean(robotPlayback)} onClick={playProgrammaticPickAndPlace}>
+          <Activity size={14} />
+          <span>Pick & place codigo</span>
+        </button>
+        <button title="Run the imported joint-by-joint diagnostic clip so every axis can be visually verified." disabled={!jointByJointClip || Boolean(robotPlayback)} onClick={() => playMotionClip(jointByJointClip)}>
+          <Play size={14} />
+          <span>Demo eje por eje</span>
+        </button>
         <button title={mechanicalTooltips.stop} disabled={autoTest.phase !== 'running'} onClick={stopInspection}>
           <Pause size={14} />
           <span>Stop</span>
+        </button>
+        <button title="Stop the professional robot animation without deleting the kinematic definition." disabled={!clipPlayback && !robotPlayback} onClick={stopMotionClip}>
+          <Pause size={14} />
+          <span>Stop animacion</span>
         </button>
         <button title={mechanicalTooltips.home} onClick={() => resetKinematicPose(node.id)}>
           <RotateCw size={14} />
@@ -5083,35 +5187,6 @@ const KinematicGraphPanel = ({
                   <button title="Use Y axis" onClick={() => updateAxis(joint, [0, 1, 0])}>Y</button>
                   <button title="Use Z axis" onClick={() => updateAxis(joint, [0, 0, 1])}>Z</button>
                 </div>
-                <label>
-                  <span title="Motion profile defines whether the whole piece moves or one endpoint stays fixed.">Motion</span>
-                  <select
-                    value={joint.motionProfile ?? (joint.type === 'prismatic' ? 'linear-slide' : 'rotation-around-origin')}
-                    onChange={(event) => {
-                      const motionProfile = event.target.value as KinematicJoint['motionProfile'];
-                      updateKinematicJoint(node.id, joint.id, {
-                        motionProfile,
-                        type: motionProfile === 'rotation-around-origin' ? 'revolute' : 'prismatic',
-                        drivenPoint:
-                          motionProfile === 'fixed-origin-lift'
-                            ? joint.drivenPoint ?? [joint.origin.position[0] + 1, joint.origin.position[1], joint.origin.position[2]]
-                            : joint.drivenPoint,
-                      });
-                    }}
-                  >
-                    <option value="rotation-around-origin">Rotate around pivot</option>
-                    <option value="linear-slide">Slide whole piece</option>
-                    <option value="fixed-origin-lift">Fixed-end lift</option>
-                  </select>
-                </label>
-                <label>
-                  <span title="Locks the joint to one movement plane so it cannot drift into another plane.">Plane</span>
-                  <select value={joint.motionPlane ?? 'xy'} onChange={(event) => updateKinematicJoint(node.id, joint.id, { motionPlane: event.target.value as MotionPlane })}>
-                    <option value="xy">XY</option>
-                    <option value="xz">XZ</option>
-                    <option value="yz">YZ</option>
-                  </select>
-                </label>
               </div>
               <details className="advanced-kinematic-fields" open={!simpleMode}>
                 <summary title="Advanced Mode exposes raw numeric axis and origin values for precise calibration.">Advanced vectors and limits</summary>
@@ -5285,6 +5360,7 @@ type GeometryInspectorProps = {
   removeValidatedMotion: (nodeId: string, motionId: string) => void;
   selectedPartNames: string[];
   setKinematicJointValue: (nodeId: string, jointId: string, value: number) => void;
+  setKinematicJointValues: (nodeId: string, values: Record<string, number>) => void;
   resetKinematicPose: (nodeId: string) => void;
   updateKinematicJoint: (nodeId: string, jointId: string, patch: Partial<KinematicJoint>) => void;
   startKinematicEdit: (nodeId: string, jointId: string, mode: KinematicEditTarget['mode']) => void;
@@ -5293,6 +5369,8 @@ type GeometryInspectorProps = {
   deleteKinematicJoint: (nodeId: string, jointId: string) => void;
   createKinematicJoint: (nodeId: string, selectedPartNames: string[]) => void;
   saveKinematicConfiguration: () => void | Promise<void>;
+  robotCursorGuideActive: boolean;
+  toggleRobotCursorGuide: (nodeId: string) => void;
   randomizeGenerator: () => void;
 };
 
@@ -5314,6 +5392,7 @@ const GeometryInspector = ({
   removeValidatedMotion,
   selectedPartNames,
   setKinematicJointValue,
+  setKinematicJointValues,
   resetKinematicPose,
   updateKinematicJoint,
   startKinematicEdit,
@@ -5322,6 +5401,8 @@ const GeometryInspector = ({
   deleteKinematicJoint,
   createKinematicJoint,
   saveKinematicConfiguration,
+  robotCursorGuideActive,
+  toggleRobotCursorGuide,
   randomizeGenerator,
 }: GeometryInspectorProps) => {
   const geometry = node.geometry;
@@ -5399,6 +5480,7 @@ const GeometryInspector = ({
           node={node}
           selectedPartNames={selectedPartNames}
           setKinematicJointValue={setKinematicJointValue}
+          setKinematicJointValues={setKinematicJointValues}
           resetKinematicPose={resetKinematicPose}
           updateKinematicJoint={updateKinematicJoint}
           startKinematicEdit={startKinematicEdit}
@@ -5407,6 +5489,8 @@ const GeometryInspector = ({
           deleteKinematicJoint={deleteKinematicJoint}
           createKinematicJoint={createKinematicJoint}
           saveKinematicConfiguration={saveKinematicConfiguration}
+          robotCursorGuideActive={robotCursorGuideActive}
+          toggleRobotCursorGuide={toggleRobotCursorGuide}
         />
         <button className={demoActive ? 'smart-motion-button active' : 'smart-motion-button'} disabled={!geometry.joints.length} onClick={toggleImportedMotionDemo}>
           {demoActive ? <Pause size={16} /> : <Activity size={16} />}

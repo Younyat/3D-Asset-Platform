@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Brazo Robot Industrial · rig animado</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
+    "three/addons/controls/OrbitControls.js": "https://unpkg.com/three@0.184.0/examples/jsm/controls/OrbitControls.js",
+    "three/addons/exporters/OBJExporter.js": "https://unpkg.com/three@0.184.0/examples/jsm/exporters/OBJExporter.js",
+    "three/addons/exporters/GLTFExporter.js": "https://unpkg.com/three@0.184.0/examples/jsm/exporters/GLTFExporter.js"
+  },
+  "integrity": {
+    "https://unpkg.com/three@0.184.0/build/three.module.js": "sha384-8FCZ1eVO6it4+pbec2aDtnTrwjWXZLJRC+MAGCIPDgsYnUrl/E0A2YlF8ioMKI/J",
+    "https://unpkg.com/three@0.184.0/build/three.core.js": "sha384-dw2ooPewaEIrAgl6oFDBmmBWCE9oW9LxRGcfwZ0hLvEprzo202wXl7vCYHRlSnOT",
+    "https://unpkg.com/three@0.184.0/examples/jsm/controls/OrbitControls.js": "sha384-4rziNxOBZKQ69i+w+f89KJ55TCYquwchVbByQwmaOeIOXdOU2PLDn3kOfXHwIJC9",
+    "https://unpkg.com/three@0.184.0/examples/jsm/exporters/OBJExporter.js": "sha384-nbwtoZENJD3Vq+ACK0CuGQdPMuDWHkamC2KJD70EV5nfg6jQjfppKOea07YJN+N3",
+    "https://unpkg.com/three@0.184.0/examples/jsm/exporters/GLTFExporter.js": "sha384-VofkvpG6HERhFCYbsUOHeNXBCqID2nfqkQqnVzE1jc/oPcz+qJ13ADdXH08hE+cQ"
+  }
+}
+</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #1c1c1e; font-family: ui-sans-serif, system-ui, sans-serif; }
+  three-d-stage:not(:defined) { visibility: hidden; }
+  three-d-stage { width: 100vw; height: 100vh; display: block; }
+  #rig-ui {
+    position: fixed; top: 20px; left: 20px; width: 244px; z-index: 10;
+    background: rgba(24,25,27,0.9); backdrop-filter: blur(8px); color: #e9e6e1;
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 16px 16px 14px;
+    font-size: 12px; display: flex; flex-direction: column; gap: 14px;
+  }
+  #rig-ui h2 { margin: 0; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #8c8781; font-weight: 600; }
+  #clips { display: flex; flex-direction: column; gap: 6px; }
+  #rig-ui button.clip {
+    font: inherit; text-align: left; cursor: pointer; color: #e9e6e1;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 7px; padding: 7px 10px;
+  }
+  #rig-ui button.clip:hover { background: rgba(255,255,255,0.12); }
+  #rig-ui button.clip.on { background: #d9520c; border-color: #d9520c; }
+  #joints { display: flex; flex-direction: column; gap: 10px; }
+  #joints .row { display: flex; flex-direction: column; gap: 4px; }
+  #joints label { display: flex; justify-content: space-between; color: #c9c4bd; }
+  #joints label span { color: #8c8781; font-variant-numeric: tabular-nums; }
+  #joints input[type=range] { width: 100%; accent-color: #d9520c; }
+  #rig-ui a { color: #e8b400; text-decoration: none; }
+  #rig-ui a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<three-d-stage name="brazo-robot-industrial" background="#e7e2da"></three-d-stage>
+
+<aside id="rig-ui">
+  <div>
+    <h2>Animaciones</h2>
+    <div id="clips" style="margin-top:8px">
+      <button class="clip" data-clip="Ciclo_Pick_And_Place" type="button">Ciclo Pick &amp; Place · 10 s</button>
+      <button class="clip" data-clip="Ir_A_Home" type="button">Ir a Home · 2 s</button>
+      <button class="clip" data-clip="Demo_Ejes" type="button">Demo de ejes · 16,2 s</button>
+    </div>
+  </div>
+  <div>
+    <h2>Control manual</h2>
+    <div id="joints" style="margin-top:8px"></div>
+  </div>
+  <a href="./Documentacion-Brazo-Robot.html">Documentación técnica →</a>
+</aside>
+
+<script src="./three-d-stage.js"></script>
+<script type="module" src="./robot-arm.js"></script>
+</body>
+</html>
